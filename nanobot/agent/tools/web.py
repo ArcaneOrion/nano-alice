@@ -45,7 +45,7 @@ def _validate_url(url: str) -> tuple[bool, str]:
 
 class WebSearchTool(Tool):
     """Search the web using Brave Search API."""
-    
+
     name = "web_search"
     description = "Search the web. Returns titles, URLs, and snippets."
     parameters = {
@@ -56,15 +56,15 @@ class WebSearchTool(Tool):
         },
         "required": ["query"]
     }
-    
+
     def __init__(self, api_key: str | None = None, max_results: int = 5):
         self.api_key = api_key or os.environ.get("BRAVE_API_KEY", "")
         self.max_results = max_results
-    
+
     async def execute(self, query: str, count: int | None = None, **kwargs: Any) -> str:
         if not self.api_key:
             return "Error: BRAVE_API_KEY not configured"
-        
+
         try:
             n = min(max(count or self.max_results, 1), 10)
             async with httpx.AsyncClient() as client:
@@ -75,11 +75,11 @@ class WebSearchTool(Tool):
                     timeout=10.0
                 )
                 r.raise_for_status()
-            
+
             results = r.json().get("web", {}).get("results", [])
             if not results:
                 return f"No results for: {query}"
-            
+
             lines = [f"Results for: {query}\n"]
             for i, item in enumerate(results[:n], 1):
                 lines.append(f"{i}. {item.get('title', '')}\n   {item.get('url', '')}")
@@ -88,6 +88,59 @@ class WebSearchTool(Tool):
             return "\n".join(lines)
         except Exception as e:
             return f"Error: {e}"
+
+
+class TavilySearchTool(Tool):
+    """Search the web using Tavily Search API."""
+
+    name = "web_search"
+    description = "Search the web using Tavily. Returns titles, URLs, and snippets."
+    parameters = {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "Search query"},
+            "count": {"type": "integer", "description": "Results (1-10)", "minimum": 1, "maximum": 10}
+        },
+        "required": ["query"]
+    }
+
+    def __init__(self, api_key: str | None = None, max_results: int = 5):
+        self.api_key = api_key or os.environ.get("TAVILY_API_KEY", "")
+        self.max_results = max_results
+
+    async def execute(self, query: str, count: int | None = None, **kwargs: Any) -> str:
+        if not self.api_key:
+            return "Error: TAVILY_API_KEY not configured"
+
+        try:
+            n = min(max(count or self.max_results, 1), 10)
+            async with httpx.AsyncClient() as client:
+                r = await client.post(
+                    "https://api.tavily.com/search",
+                    json={"api_key": self.api_key, "query": query, "max_results": n},
+                    timeout=15.0,
+                )
+                r.raise_for_status()
+
+            results = r.json().get("results", [])
+            if not results:
+                return f"No results for: {query}"
+
+            lines = [f"Results for: {query}\n"]
+            for i, item in enumerate(results[:n], 1):
+                lines.append(f"{i}. {item.get('title', '')}\n   {item.get('url', '')}")
+                if snippet := item.get("content"):
+                    lines.append(f"   {snippet[:200]}")
+            return "\n".join(lines)
+        except Exception as e:
+            return f"Error: {e}"
+
+
+def make_search_tool(api_key: str | None = None, tavily_api_key: str | None = None, max_results: int = 5) -> "WebSearchTool | TavilySearchTool":
+    """Return TavilySearchTool when tavily_api_key is set, else WebSearchTool (Brave)."""
+    if tavily_api_key:
+        return TavilySearchTool(api_key=tavily_api_key, max_results=max_results)
+    return WebSearchTool(api_key=api_key, max_results=max_results)
 
 
 class WebFetchTool(Tool):
