@@ -278,6 +278,14 @@ class FeishuChannel(BaseChannel):
             self._on_message_sync
         ).build()
         
+        # websockets uses Python default SSL context which may not find system CA on NixOS.
+        # Point SSL_CERT_FILE to certifi's bundle so all SSL connections in this process use it.
+        try:
+            import certifi
+            os.environ.setdefault("SSL_CERT_FILE", certifi.where())
+        except ImportError:
+            pass
+
         # Create WebSocket client for long connection
         self._ws_client = lark.ws.Client(
             self.config.app_id,
