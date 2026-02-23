@@ -123,6 +123,24 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         model_overrides=(),
     ),
 
+    # Wanqing (快手万擎): OpenAI-compatible gateway by Kuaishou
+    ProviderSpec(
+        name="wanqing",
+        keywords=("wanqing",),
+        env_key="OPENAI_API_KEY",
+        display_name="Wanqing",
+        litellm_prefix="openai",
+        skip_prefixes=(),
+        env_extras=(),
+        is_gateway=True,
+        is_local=False,
+        detect_by_key_prefix="",
+        detect_by_base_keyword="streamlakeapi",
+        default_api_base="https://wanqing.streamlakeapi.com/api/gateway/v1/endpoints",
+        strip_model_prefix=True,            # wanqing/glm-5 → glm-5 → openai/glm-5
+        model_overrides=(),
+    ),
+
     # SiliconFlow (硅基流动): OpenAI-compatible gateway, model names keep org prefix
     ProviderSpec(
         name="siliconflow",
