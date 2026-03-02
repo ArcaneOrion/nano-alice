@@ -23,12 +23,21 @@ from nanobot.agent.tools.spawn import SpawnTool
 from nanobot.agent.tools.web import WebFetchTool, make_search_tool
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
-from nanobot.providers.base import LLMProvider
+from nanobot.providers.base import LLMProvider, LLMResponse
 from nanobot.session.manager import Session, SessionManager
 
 if TYPE_CHECKING:
     from nanobot.config.schema import EmbeddingsConfig, ExecToolConfig, MemoryAgentConfig
     from nanobot.cron.service import CronService
+
+_LLM_MAX_RETRIES = 3
+_LLM_RETRY_BASE_DELAY = 2  # 秒，指数退避基数
+
+# 匹配到这些关键词的错误不重试（认证/权限类，重试也没用）
+_NON_RETRYABLE_PATTERNS = (
+    "401", "403", "AuthenticationError", "PermissionDenied",
+    "invalid api key", "invalid_api_key", "Unauthorized",
+)
 
 
 class AgentLoop:
@@ -216,6 +225,48 @@ class AgentLoop:
             return f'{tc.name}("{val[:40]}…")' if len(val) > 40 else f'{tc.name}("{val}")'
         return ", ".join(_fmt(tc) for tc in tool_calls)
 
+    async def _chat_with_retry(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+    ) -> LLMResponse:
+        """调用 LLM，遇到可重试错误自动退避重试。"""
+        response: LLMResponse | None = None
+        for attempt in range(_LLM_MAX_RETRIES + 1):  # 0..MAX_RETRIES
+            response = await self.provider.chat(
+                messages=messages,
+                tools=tools,
+                model=self.model,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+            )
+
+            # 正常返回
+            if response.finish_reason != "error":
+                return response
+
+            error_text = response.content or ""
+
+            # 不可重试的错误（认证/权限），立即返回
+            if any(p in error_text for p in _NON_RETRYABLE_PATTERNS):
+                logger.error("LLM non-retryable error: {}", error_text[:200])
+                return response
+
+            # 最后一次尝试也失败，返回错误
+            if attempt == _LLM_MAX_RETRIES:
+                logger.error("LLM failed after {} retries: {}", _LLM_MAX_RETRIES, error_text[:200])
+                return response
+
+            # 可重试：指数退避
+            delay = _LLM_RETRY_BASE_DELAY * (2 ** attempt)  # 2s, 4s, 8s
+            logger.warning(
+                "LLM error (attempt {}/{}), retrying in {}s: {}",
+                attempt + 1, _LLM_MAX_RETRIES + 1, delay, error_text[:200],
+            )
+            await asyncio.sleep(delay)
+
+        return response  # type: ignore[return-value]  # unreachable, for type checker
+
     async def _run_agent_loop(
         self,
         initial_messages: list[dict],
@@ -230,13 +281,7 @@ class AgentLoop:
         while iteration < self.max_iterations:
             iteration += 1
 
-            response = await self.provider.chat(
-                messages=messages,
-                tools=self.tools.get_definitions(),
-                model=self.model,
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-            )
+            response = await self._chat_with_retry(messages, self.tools.get_definitions())
 
             if response.has_tool_calls:
                 if on_progress:
@@ -271,6 +316,8 @@ class AgentLoop:
                     )
             else:
                 final_content = self._strip_think(response.content)
+                if response.finish_reason == "error":
+                    logger.error("LLM returned error after retries: {}", (final_content or "")[:200])
                 break
 
         return final_content, tools_used
