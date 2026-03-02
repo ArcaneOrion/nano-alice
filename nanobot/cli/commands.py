@@ -279,13 +279,13 @@ This file stores important information that should persist across sessions.
     skills_dir.mkdir(exist_ok=True)
 
 
-def _make_provider(config: Config):
+def _make_provider(config: Config, model: str | None = None):
     """Create the appropriate LLM provider from config."""
     from nanobot.providers.litellm_provider import LiteLLMProvider
     from nanobot.providers.openai_codex_provider import OpenAICodexProvider
     from nanobot.providers.custom_provider import CustomProvider
 
-    model = config.agents.defaults.model
+    model = model or config.agents.defaults.model
     provider_name = config.get_provider_name(model)
     p = config.get_provider(model)
 
@@ -315,6 +315,26 @@ def _make_provider(config: Config):
         extra_headers=p.extra_headers if p else None,
         provider_name=provider_name,
     )
+
+
+def _make_memory_provider(config: Config):
+    """Create a separate provider for the memory subagent, or None to reuse main."""
+    from nanobot.providers.custom_provider import CustomProvider
+
+    memory_cfg = config.agents.memory
+    if not memory_cfg.enabled or not memory_cfg.model:
+        return None
+
+    # Explicit api_key + api_base → CustomProvider (OpenAI-compatible)
+    if memory_cfg.api_key and memory_cfg.api_base:
+        return CustomProvider(
+            api_key=memory_cfg.api_key,
+            api_base=memory_cfg.api_base,
+            default_model=memory_cfg.model,
+        )
+
+    # Model set but no explicit credentials → auto-match from providers
+    return _make_provider(config, memory_cfg.model)
 
 
 # ============================================================================
@@ -347,11 +367,14 @@ def gateway(
     bus = MessageBus()
     provider = _make_provider(config)
     session_manager = SessionManager(config.workspace_path)
-    
+
+    # Memory subagent provider (separate credentials when configured)
+    memory_provider = _make_memory_provider(config)
+
     # Create cron service first (callback set after agent creation)
     cron_store_path = get_data_dir() / "cron" / "jobs.json"
     cron = CronService(cron_store_path)
-    
+
     # Create agent with cron service
     agent = AgentLoop(
         bus=bus,
@@ -369,8 +392,11 @@ def gateway(
         restrict_to_workspace=config.tools.restrict_to_workspace,
         session_manager=session_manager,
         mcp_servers=config.tools.mcp_servers,
+        embeddings_config=config.tools.embeddings,
+        memory_agent_config=config.agents.memory,
+        memory_provider=memory_provider,
     )
-    
+
     # Set cron callback (needs agent)
     async def on_cron_job(job: CronJob) -> str | None:
         """Execute a cron job through the agent."""
@@ -458,7 +484,7 @@ def agent(
     from loguru import logger
     
     config = load_config()
-    
+
     bus = MessageBus()
     provider = _make_provider(config)
 
@@ -466,11 +492,14 @@ def agent(
     cron_store_path = get_data_dir() / "cron" / "jobs.json"
     cron = CronService(cron_store_path)
 
+    # Memory subagent provider
+    memory_provider = _make_memory_provider(config)
+
     if logs:
         logger.enable("nanobot")
     else:
         logger.disable("nanobot")
-    
+
     agent_loop = AgentLoop(
         bus=bus,
         provider=provider,
@@ -486,8 +515,11 @@ def agent(
         cron_service=cron,
         restrict_to_workspace=config.tools.restrict_to_workspace,
         mcp_servers=config.tools.mcp_servers,
+        embeddings_config=config.tools.embeddings,
+        memory_agent_config=config.agents.memory,
+        memory_provider=memory_provider,
     )
-    
+
     # Show spinner when logs are off (no output to miss); skip when logs are on
     def _thinking_ctx():
         if logs:
@@ -505,6 +537,7 @@ def agent(
             with _thinking_ctx():
                 response = await agent_loop.process_direct(message, session_id, on_progress=_cli_progress)
             _print_agent_response(response, render_markdown=markdown)
+            await agent_loop.await_pending()
             await agent_loop.close_mcp()
 
         asyncio.run(run_once())
@@ -593,6 +626,7 @@ def agent(
                 agent_loop.stop()
                 outbound_task.cancel()
                 await asyncio.gather(bus_task, outbound_task, return_exceptions=True)
+                await agent_loop.await_pending()
                 await agent_loop.close_mcp()
 
         asyncio.run(run_interactive())
@@ -950,6 +984,9 @@ def cron_run(
     config = load_config()
     provider = _make_provider(config)
     bus = MessageBus()
+
+    memory_provider = _make_memory_provider(config)
+
     agent_loop = AgentLoop(
         bus=bus,
         provider=provider,
@@ -964,6 +1001,9 @@ def cron_run(
         exec_config=config.tools.exec,
         restrict_to_workspace=config.tools.restrict_to_workspace,
         mcp_servers=config.tools.mcp_servers,
+        embeddings_config=config.tools.embeddings,
+        memory_agent_config=config.agents.memory,
+        memory_provider=memory_provider,
     )
 
     store_path = get_data_dir() / "cron" / "jobs.json"

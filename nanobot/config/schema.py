@@ -190,10 +190,20 @@ class AgentDefaults(Base):
     memory_window: int = 50
 
 
+class MemoryAgentConfig(Base):
+    """Memory subagent configuration."""
+
+    enabled: bool = True
+    model: str = ""  # empty = use main agent model
+    api_key: str = ""  # empty = auto-match from providers
+    api_base: str = ""  # empty = auto-match from providers
+
+
 class AgentsConfig(Base):
     """Agent configuration."""
 
     defaults: AgentDefaults = Field(default_factory=AgentDefaults)
+    memory: MemoryAgentConfig = Field(default_factory=MemoryAgentConfig)
 
 
 class ProviderConfig(Base):
@@ -264,11 +274,22 @@ class MCPServerConfig(Base):
     headers: dict[str, str] = Field(default_factory=dict)  # HTTP: Custom HTTP Headers
 
 
+class EmbeddingsConfig(Base):
+    """Embedding API configuration for semantic memory search."""
+
+    api_base: str = ""          # e.g. "https://ai.hybgzs.com"
+    api_key: str = ""
+    model: str = ""             # e.g. "Qwen/Qwen3-Embedding-4B"
+    dimensions: int = 0         # 0 = use model default (don't send dimensions param)
+    extra_headers: dict[str, str] = Field(default_factory=dict)
+
+
 class ToolsConfig(Base):
     """Tools configuration."""
 
     web: WebToolsConfig = Field(default_factory=WebToolsConfig)
     exec: ExecToolConfig = Field(default_factory=ExecToolConfig)
+    embeddings: EmbeddingsConfig = Field(default_factory=EmbeddingsConfig)
     restrict_to_workspace: bool = False  # If true, restrict all tool access to workspace directory
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
 

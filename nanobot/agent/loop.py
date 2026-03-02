@@ -27,7 +27,7 @@ from nanobot.providers.base import LLMProvider
 from nanobot.session.manager import Session, SessionManager
 
 if TYPE_CHECKING:
-    from nanobot.config.schema import ExecToolConfig
+    from nanobot.config.schema import EmbeddingsConfig, ExecToolConfig, MemoryAgentConfig
     from nanobot.cron.service import CronService
 
 
@@ -60,6 +60,9 @@ class AgentLoop:
         restrict_to_workspace: bool = False,
         session_manager: SessionManager | None = None,
         mcp_servers: dict | None = None,
+        embeddings_config: EmbeddingsConfig | None = None,
+        memory_agent_config: MemoryAgentConfig | None = None,
+        memory_provider: LLMProvider | None = None,
     ):
         from nanobot.config.schema import ExecToolConfig
         self.bus = bus
@@ -75,6 +78,7 @@ class AgentLoop:
         self.exec_config = exec_config or ExecToolConfig()
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
+        self.embeddings_config = embeddings_config
 
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
@@ -98,6 +102,33 @@ class AgentLoop:
         self._mcp_connected = False
         self._mcp_connecting = False
         self._consolidating: set[str] = set()  # Session keys with consolidation in progress
+        self._pending_tasks: list[asyncio.Task] = []  # Background tasks (memory agent, etc.)
+
+        # Memory agent config
+        self._memory_agent_enabled = (
+            memory_agent_config.enabled if memory_agent_config else True
+        )
+        self._memory_agent_model = (
+            (memory_agent_config.model if memory_agent_config and memory_agent_config.model
+             else None) or self.model
+        )
+        self._memory_provider = memory_provider or self.provider
+
+        # RAG: shared memory index for recall
+        self._memory_index = None
+        if (embeddings_config
+                and embeddings_config.api_key
+                and embeddings_config.api_base):
+            from nanobot.agent.tools.memory_search import _MemoryIndex
+            self._memory_index = _MemoryIndex(
+                memory_dir=workspace / "memory",
+                api_base=embeddings_config.api_base,
+                api_key=embeddings_config.api_key,
+                model=embeddings_config.model,
+                dimensions=embeddings_config.dimensions,
+                extra_headers=embeddings_config.extra_headers,
+            )
+
         self._register_default_tools()
 
     def _register_default_tools(self) -> None:
@@ -119,6 +150,18 @@ class AgentLoop:
         self.tools.register(SpawnTool(manager=self.subagents))
         if self.cron_service:
             self.tools.register(CronTool(self.cron_service))
+        if (self.embeddings_config
+                and self.embeddings_config.api_key
+                and self.embeddings_config.api_base):
+            from nanobot.agent.tools.memory_search import MemorySearchTool
+            self.tools.register(MemorySearchTool(
+                workspace=self.workspace,
+                api_base=self.embeddings_config.api_base,
+                api_key=self.embeddings_config.api_key,
+                model=self.embeddings_config.model,
+                dimensions=self.embeddings_config.dimensions,
+                extra_headers=self.embeddings_config.extra_headers,
+            ))
 
     async def _connect_mcp(self) -> None:
         """Connect to configured MCP servers (one-time, lazy)."""
@@ -271,6 +314,13 @@ class AgentLoop:
                 pass  # MCP SDK cancel scope cleanup is noisy but harmless
             self._mcp_stack = None
 
+    async def await_pending(self) -> None:
+        """Wait for background tasks (memory agent, etc.) to complete."""
+        tasks = [t for t in self._pending_tasks if not t.done()]
+        self._pending_tasks.clear()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
     def stop(self) -> None:
         """Stop the agent loop."""
         self._running = False
@@ -344,11 +394,24 @@ class AgentLoop:
             if isinstance(message_tool, MessageTool):
                 message_tool.start_turn()
 
+        # RAG: semantic search for relevant memory
+        recalled_context = None
+        if self._memory_index:
+            try:
+                results = await self._memory_index.search(msg.content, top_k=3)
+                if results:
+                    recalled_context = "\n\n---\n\n".join(
+                        f"[{r['file']} L{r['lines']}] {r['text']}" for r in results
+                    )
+            except Exception as e:
+                logger.warning("RAG recall failed: {}", e)
+
         initial_messages = self.context.build_messages(
             history=session.get_history(max_messages=self.memory_window),
             current_message=msg.content,
             media=msg.media if msg.media else None,
             channel=msg.channel, chat_id=msg.chat_id,
+            recalled_context=recalled_context,
         )
 
         async def _bus_progress(content: str) -> None:
@@ -373,6 +436,12 @@ class AgentLoop:
                             tools_used=tools_used if tools_used else None)
         self.sessions.save(session)
 
+        # Launch memory subagent in background (skip system/heartbeat messages)
+        is_heartbeat = session_key == "heartbeat" or msg.content.startswith("Read HEARTBEAT.md")
+        if self._memory_agent_enabled and msg.channel != "system" and not is_heartbeat:
+            task = asyncio.create_task(self._run_memory_agent(session))
+            self._pending_tasks.append(task)
+
         if message_tool := self.tools.get("message"):
             if isinstance(message_tool, MessageTool) and message_tool._sent_in_turn:
                 return None
@@ -383,11 +452,29 @@ class AgentLoop:
         )
 
     async def _consolidate_memory(self, session, archive_all: bool = False) -> None:
-        """Delegate to MemoryStore.consolidate()."""
+        """Delegate to MemoryStore.consolidate() (pure trimming)."""
         await MemoryStore(self.workspace).consolidate(
-            session, self.provider, self.model,
-            archive_all=archive_all, memory_window=self.memory_window,
+            session, archive_all=archive_all, memory_window=self.memory_window,
         )
+
+    async def _run_memory_agent(self, session: Session) -> None:
+        """Run memory subagent in background to extract memories."""
+        from nanobot.agent.memory_agent import MemoryAgent
+
+        recent = session.messages[-10:]  # last 5 turns (user + assistant)
+        if not recent:
+            return
+
+        agent = MemoryAgent(
+            provider=self._memory_provider,
+            workspace=self.workspace,
+            model=self._memory_agent_model,
+            embeddings_config=self.embeddings_config,
+        )
+        try:
+            await agent.run(recent)
+        except Exception as e:
+            logger.error("Memory agent failed: {}", e)
 
     async def process_direct(
         self,
