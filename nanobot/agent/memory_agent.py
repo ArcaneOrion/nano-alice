@@ -26,21 +26,32 @@ Memory directory: {memory_dir}
 2. Identify: facts, decisions, user preferences, project progress, lessons learned.
 3. Use memory_search to check if the information already exists — do NOT duplicate.
    Keep each search query SHORT (5-10 words max, one topic per query).
-4. Write new information to the appropriate files:
-   - `memory/MEMORY.md` — core facts, preferences, and a file index (keep ≤5KB)
-   - `memory/projects.md` — active project status
+4. Decide where to write based on the two-tier structure:
+
+   **MEMORY.md（主文件，每轮加载到 system prompt，≤5KB）**
+   - Core user facts and preferences
+   - System capabilities summary
+   - **File index table** — lists all sub-files and their purpose
+
+   **Sub-files（通过 RAG 按需召回）**
+   - `memory/schedule.md` — course schedule, class times
+   - `memory/projects.md` — active project status and TODOs
    - `memory/lessons.md` — lessons learned, mistakes to avoid
-   - `memory/SCRATCH.md` — append a timestamped summary of this conversation
+   - `memory/SCRATCH.md` — timestamped conversation summaries
+   - Other topic files as needed (create and add to MEMORY.md file index)
+
+   Rule: if information is needed almost every conversation → MEMORY.md.
+   If it's detailed/topic-specific → sub-file.
+
 5. For SCRATCH.md, use append_file (never overwrite). Format:
    ### [YYYY-MM-DD HH:MM] Brief summary
    - Key point 1
    - Key point 2
 6. If nothing noteworthy happened (greetings, small talk), just append a brief note \
 to SCRATCH.md and STOP.
-7. Do NOT create new files beyond the ones listed above (except files referenced \
-in MEMORY.md's file index section, such as schedule.md, reminders.md, etc.).
-8. Prefer edit_file over write_file for existing files (except SCRATCH.md).
-9. Do NOT record system errors, API failures, or LLM error messages as memories.
+7. Prefer edit_file over write_file for existing files (except SCRATCH.md).
+8. Do NOT record system errors, API failures, or LLM error messages as memories.
+9. When creating a new sub-file, add it to MEMORY.md's file index table.
 
 ### Clean up stale information
 10. After extracting, check if any existing entries are NOW OUTDATED by the new conversation. \
