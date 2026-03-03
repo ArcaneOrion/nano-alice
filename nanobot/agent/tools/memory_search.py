@@ -174,8 +174,6 @@ class _MemoryIndex:
         md_files: dict[str, float] = {}
         for f in self._memory_dir.glob("**/*.md"):
             rel = str(f.relative_to(self._memory_dir))
-            if rel == "SCRATCH.md":
-                continue
             md_files[rel] = f.stat().st_mtime
 
         dirty_files: set[str] = set()

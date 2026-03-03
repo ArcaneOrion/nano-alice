@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-本文件为 Claude Code (claude.ai/code) 提供代码库指导。
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Git 提交规范
 
@@ -82,9 +82,10 @@ Channel ← OutboundMessage ← MessageBus ← AgentLoop ← 工具执行循环
 
 | 文件 | 用途 | 被索引? |
 |------|------|---------|
-| `memory/MEMORY.md` | 长期事实、偏好 | ✅ |
+| `memory/MEMORY.md` | 核心事实、偏好、文件索引（每轮全量注入 system prompt，≤5KB） | ✅ |
 | `memory/HISTORY.md` | 追加式事件日志 | ✅ |
-| `memory/SCRATCH.md` | 每轮对话概要（subagent 写入） | ❌（排除） |
+| `memory/SCRATCH.md` | 每轮对话概要（subagent 写入） | ✅ |
+| `memory/schedule.md` | 课程表、作息时间 | ✅ |
 | `memory/projects.md` | 活跃项目状态 | ✅ |
 | `memory/lessons.md` | 经验教训 | ✅ |
 | `memory/YYYY-MM-DD.md` | 每日日志 | ✅ |
@@ -117,7 +118,7 @@ Channel ← OutboundMessage ← MessageBus ← AgentLoop ← 工具执行循环
 
 - **`nanobot/agent/tools/base.py`** — `Tool` ABC：所有工具实现 `name`, `description`, `parameters`（JSON Schema）和 `execute()`。内置参数校验 `validate_params()`。
 - **`nanobot/agent/tools/registry.py`** — `ToolRegistry`：动态工具注册和执行。通过 `to_schema()` 生成 OpenAI 格式工具定义。
-- **`nanobot/agent/tools/memory_search.py`** — `MemorySearchTool` + `_MemoryIndex`：基于 embedding 的语义搜索。`_MemoryIndex` 同时被 RAG 注入和 memory subagent 复用。索引时排除 `SCRATCH.md`。
+- **`nanobot/agent/tools/memory_search.py`** — `MemorySearchTool` + `_MemoryIndex`：基于 embedding 的语义搜索。`_MemoryIndex` 同时被 RAG 注入和 memory subagent 复用。索引所有 `memory/*.md` 文件。
 - 内置工具：`filesystem.py`（read/write/edit/list）, `shell.py`（exec）, `web.py`（search/fetch）, `message.py`（发送到频道）, `spawn.py`（后台子 agent）, `cron.py`（定时任务）, `mcp.py`（MCP 集成）。
 
 **添加新工具：**
@@ -180,9 +181,17 @@ Channel ← OutboundMessage ← MessageBus ← AgentLoop ← 工具执行循环
 
 MCP 服务器在 `config.tools.mcp_servers` 中配置。两种传输：stdio（`command`/`args`/`env`）和 HTTP（`url`/`headers`）。连接是懒加载的（首条消息时）。每个 MCP 工具注册为 `mcp_{server_name}_{tool_name}` 的 `MCPToolWrapper`。`AsyncExitStack` 管理所有会话生命周期。
 
+### Docker 部署
+
+- `Dockerfile` — 多阶段构建，基于 `uv` + Python 3.12，含 Node.js 20（用于 WhatsApp bridge 构建）
+- `docker-compose.yml` — 两个服务：`nanobot-gateway`（端口 18790，1 CPU / 1GB RAM 限制）和 `nanobot-cli`（profile: cli）
+- 配置卷挂载：`~/.nanobot:/root/.nanobot`
+
 ## 代码规范
 
 - Ruff linter：行长度 100，目标 Python 3.11，规则 E/F/I/N/W（E501 忽略）
+- 日志使用 `loguru`（非 stdlib `logging`）：`from loguru import logger`
+- CLI 框架使用 Typer，入口 `nanobot.cli.commands:app`
 - 测试使用 pytest，`asyncio_mode = "auto"` — `async def test_*` 函数无需装饰器
 - 测试 mock 文件系统路径，使用 `tmp_path` 做真实文件 I/O；测试中不调用 LLM
 - 配置 JSON 使用 camelCase；Python 代码使用 snake_case — Pydantic 通过 `alias_generator` 处理转换
