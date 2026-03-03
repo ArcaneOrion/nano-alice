@@ -7,11 +7,15 @@ description: Schedule reminders and recurring tasks.
 
 Use the `cron` tool to schedule reminders or recurring tasks.
 
-## Three Modes
+## 工作原理
 
-1. **Reminder** - message is sent directly to user
-2. **Task** - message is a task description, agent executes and sends result
-3. **One-time** - runs once at a specific time, then auto-deletes
+定时任务到期时，消息会以 `[定时任务: {name}] {message}` 格式出现在你的对话中（sender_id 为 "cron"）。你需要像处理用户消息一样处理它——理解任务内容，执行所需操作，然后回复用户。回复会自动发送到创建任务时的频道和聊天。
+
+## 三种模式
+
+1. **提醒** — 到期后你收到消息，直接转达给用户
+2. **任务** — 到期后你收到任务描述，执行后将结果回复用户
+3. **一次性** — 在指定时间运行一次后自动删除
 
 ## Examples
 

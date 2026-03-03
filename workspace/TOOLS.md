@@ -83,27 +83,18 @@ Use for complex or time-consuming tasks that can run independently. The subagent
 
 ## Scheduled Reminders (Cron)
 
-Use the `exec` tool to create scheduled reminders with `nanobot cron add`:
+### cron tool
 
-### Set a recurring reminder
-```bash
-# Every day at 9am
-nanobot cron add --name "morning" --message "Good morning! ☀️" --cron "0 9 * * *"
+Use the `cron` tool to schedule reminders and recurring tasks.
 
-# Every 2 hours
-nanobot cron add --name "water" --message "Drink water! 💧" --every 7200
+定时任务到期时，消息以 `[定时任务: {name}] {message}` 格式出现在你的对话中。像处理用户消息一样处理它——理解内容、执行操作、回复用户。回复自动发送到创建任务时的频道。
+
 ```
-
-### Set a one-time reminder
-```bash
-# At a specific time (ISO format)
-nanobot cron add --name "meeting" --message "Meeting starts now!" --at "2025-01-31T15:00:00"
-```
-
-### Manage reminders
-```bash
-nanobot cron list              # List all jobs
-nanobot cron remove <job_id>   # Remove a job
+cron(action="add", message="Good morning! ☀️", cron_expr="0 9 * * *")
+cron(action="add", message="Drink water! 💧", every_seconds=7200)
+cron(action="add", message="Meeting starts now!", at="2025-01-31T15:00:00")
+cron(action="list")
+cron(action="remove", job_id="abc123")
 ```
 
 ## Heartbeat Task Management
