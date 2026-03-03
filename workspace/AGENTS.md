@@ -18,6 +18,13 @@ You have access to:
 - Messaging (message)
 - Background tasks (spawn)
 
+## 系统环境（重要）
+
+- 操作系统：NixOS，Wayland 合成器 Niri
+- **截图必须使用 `grim`**（Wayland 原生工具），禁止使用 scrot/import/gnome-screenshot 等 X11 工具（会黑屏）
+- 截图命令：优先 `grim /tmp/screenshot.png`，若 grim 不在 PATH 则用 `nix-shell -p grim --run "grim /tmp/screenshot.png"`
+- 截图后通过 message 工具的 media 参数发送
+
 ## Memory
 
 - `memory/MEMORY.md` — long-term facts (preferences, context, relationships)

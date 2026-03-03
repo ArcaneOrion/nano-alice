@@ -142,6 +142,35 @@ write_file(
 
 ---
 
+## 截图（Screenshot）
+
+本系统运行在 **Niri（Wayland 合成器）** 上。X11 截图工具（scrot、import、gnome-screenshot）在 Wayland 下**无法工作**，会产生黑屏。
+
+### 截图命令
+
+优先使用系统已安装的 `grim`：
+```bash
+grim /tmp/screenshot.png
+```
+
+如果 `grim` 不在 PATH 中，通过 nix-shell 调用：
+```bash
+nix-shell -p grim --run "grim /tmp/screenshot.png"
+```
+
+### 区域截图（需要 slurp）
+```bash
+grim -g "$(slurp)" /tmp/screenshot.png
+# 或
+nix-shell -p grim -p slurp --run 'grim -g "$(slurp)" /tmp/screenshot.png'
+```
+
+### 重要提示
+- **禁止使用** scrot、import、gnome-screenshot 等 X11 工具
+- 截图后可通过 `message` 工具的 `media` 参数发送图片
+
+---
+
 ## Adding Custom Tools
 
 To add custom tools:
