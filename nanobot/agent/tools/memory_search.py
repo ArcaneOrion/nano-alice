@@ -168,9 +168,15 @@ class _MemoryIndex:
 
     # --- update & search ---
 
+    _UPDATE_COOLDOWN = 300  # seconds — skip re-embedding a file if indexed <5min ago
+    _SCRATCH_TAIL_CHARS = 8000  # only index the tail of SCRATCH.md
+
     async def _update(self) -> None:
         """Check for changed files and re-embed only dirty chunks."""
         self._load()
+
+        import time as _time
+        now = _time.time()
 
         md_files: dict[str, float] = {}
         for f in self._memory_dir.glob("**/*.md"):
@@ -180,6 +186,10 @@ class _MemoryIndex:
         dirty_files: set[str] = set()
         for rel, mtime in md_files.items():
             if rel not in self._file_mtimes or self._file_mtimes[rel] < mtime:
+                # Cooldown: skip if we indexed this file recently
+                last_indexed = self._file_mtimes.get(rel, 0)
+                if last_indexed > 0 and (now - mtime) < self._UPDATE_COOLDOWN:
+                    continue
                 dirty_files.add(rel)
 
         removed_files = set(self._file_mtimes) - set(md_files)
@@ -211,6 +221,9 @@ class _MemoryIndex:
             if not fp.exists():
                 continue
             text = fp.read_text(encoding="utf-8")
+            # For large append-only files, only index the tail
+            if rel == "SCRATCH.md" and len(text) > self._SCRATCH_TAIL_CHARS:
+                text = text[-self._SCRATCH_TAIL_CHARS:]
             for start, end, block in self._chunk_markdown(text):
                 new_chunks.append(_Chunk(source=rel, start_line=start, end_line=end, text=block))
 
