@@ -136,6 +136,7 @@ class _MemoryIndex:
             headers = {
                 "Authorization": f"Bearer {self._api_key}",
                 "Content-Type": "application/json",
+                "User-Agent": "curl/8.0",
                 **self._extra_headers,
             }
             body: dict[str, Any] = {"model": self._model, "input": batch}
