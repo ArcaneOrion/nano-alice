@@ -398,22 +398,19 @@ def gateway(
     )
 
     # Set cron callback (needs agent)
-    async def on_cron_job(job: CronJob) -> str | None:
-        """Execute a cron job through the agent."""
-        response = await agent.process_direct(
-            job.payload.message,
-            session_key=f"cron:{job.id}",
-            channel=job.payload.channel or "cli",
-            chat_id=job.payload.to or "direct",
-        )
-        if job.payload.deliver and job.payload.to:
-            from nanobot.bus.events import OutboundMessage
-            await bus.publish_outbound(OutboundMessage(
-                channel=job.payload.channel or "cli",
-                chat_id=job.payload.to,
-                content=response or ""
-            ))
-        return response
+    async def on_cron_job(job: CronJob) -> None:
+        """将 cron 任务作为消息注入 MessageBus。"""
+        from nanobot.bus.events import InboundMessage
+        channel = job.payload.channel or "cli"
+        chat_id = job.payload.to or "direct"
+        content = f"[定时任务: {job.name}] {job.payload.message}"
+        await bus.publish_inbound(InboundMessage(
+            channel=channel,
+            sender_id="cron",
+            chat_id=chat_id,
+            content=content,
+            metadata={"_cron_job_id": job.id},
+        ))
     cron.on_job = on_cron_job
     
     # Create heartbeat service
@@ -885,7 +882,6 @@ def cron_add(
     cron_expr: str = typer.Option(None, "--cron", "-c", help="Cron expression (e.g. '0 9 * * *')"),
     tz: str | None = typer.Option(None, "--tz", help="IANA timezone for cron (e.g. 'America/Vancouver')"),
     at: str = typer.Option(None, "--at", help="Run once at time (ISO format)"),
-    deliver: bool = typer.Option(False, "--deliver", "-d", help="Deliver response to channel"),
     to: str = typer.Option(None, "--to", help="Recipient for delivery"),
     channel: str = typer.Option(None, "--channel", help="Channel for delivery (e.g. 'telegram', 'whatsapp')"),
 ):
@@ -919,7 +915,6 @@ def cron_add(
             name=name,
             schedule=schedule,
             message=message,
-            deliver=deliver,
             to=to,
             channel=channel,
         )
@@ -1011,7 +1006,7 @@ def cron_run(
 
     result_holder = []
 
-    async def on_job(job: CronJob) -> str | None:
+    async def on_job(job: CronJob) -> None:
         response = await agent_loop.process_direct(
             job.payload.message,
             session_key=f"cron:{job.id}",
@@ -1019,7 +1014,6 @@ def cron_run(
             chat_id=job.payload.to or "direct",
         )
         result_holder.append(response)
-        return response
 
     service.on_job = on_job
 

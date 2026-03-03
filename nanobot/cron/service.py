@@ -65,7 +65,7 @@ class CronService:
     def __init__(
         self,
         store_path: Path,
-        on_job: Callable[[CronJob], Coroutine[Any, Any, str | None]] | None = None
+        on_job: Callable[[CronJob], Coroutine[Any, Any, None]] | None = None
     ):
         self.store_path = store_path
         self.on_job = on_job  # Callback to execute job, returns response text
@@ -97,7 +97,6 @@ class CronService:
                         payload=CronPayload(
                             kind=j["payload"].get("kind", "agent_turn"),
                             message=j["payload"].get("message", ""),
-                            deliver=j["payload"].get("deliver", False),
                             channel=j["payload"].get("channel"),
                             to=j["payload"].get("to"),
                         ),
@@ -144,7 +143,6 @@ class CronService:
                     "payload": {
                         "kind": j.payload.kind,
                         "message": j.payload.message,
-                        "deliver": j.payload.deliver,
                         "channel": j.payload.channel,
                         "to": j.payload.to,
                     },
@@ -239,10 +237,9 @@ class CronService:
         logger.info("Cron: executing job '{}' ({})", job.name, job.id)
         
         try:
-            response = None
             if self.on_job:
-                response = await self.on_job(job)
-            
+                await self.on_job(job)
+
             job.state.last_status = "ok"
             job.state.last_error = None
             logger.info("Cron: job '{}' completed", job.name)
@@ -279,7 +276,6 @@ class CronService:
         name: str,
         schedule: CronSchedule,
         message: str,
-        deliver: bool = False,
         channel: str | None = None,
         to: str | None = None,
         delete_after_run: bool = False,
@@ -288,7 +284,7 @@ class CronService:
         store = self._load_store()
         _validate_schedule_for_add(schedule)
         now = _now_ms()
-        
+
         job = CronJob(
             id=str(uuid.uuid4())[:8],
             name=name,
@@ -297,7 +293,6 @@ class CronService:
             payload=CronPayload(
                 kind="agent_turn",
                 message=message,
-                deliver=deliver,
                 channel=channel,
                 to=to,
             ),

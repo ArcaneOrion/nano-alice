@@ -483,9 +483,10 @@ class AgentLoop:
                             tools_used=tools_used if tools_used else None)
         self.sessions.save(session)
 
-        # Launch memory subagent in background (skip system/heartbeat messages)
+        # Launch memory subagent in background (skip system/heartbeat/cron messages)
         is_heartbeat = session_key == "heartbeat" or msg.content.startswith("Read HEARTBEAT.md")
-        if self._memory_agent_enabled and msg.channel != "system" and not is_heartbeat:
+        is_cron = msg.sender_id == "cron"
+        if self._memory_agent_enabled and msg.channel != "system" and not is_heartbeat and not is_cron:
             task = asyncio.create_task(self._run_memory_agent(session))
             self._pending_tasks.append(task)
 
