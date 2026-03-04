@@ -384,6 +384,11 @@ def gateway(
     
     _setup_logging(enable_console=verbose)
 
+    # 第三方库（litellm 等）使用 stdlib logging，verbose 时也开启
+    if verbose:
+        import logging
+        logging.basicConfig(level=logging.DEBUG)
+
     console.print(f"{__logo__} Starting nano-alice gateway on port {port}...")
     
     config = load_config()
