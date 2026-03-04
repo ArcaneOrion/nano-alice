@@ -156,8 +156,12 @@ To recall past events, grep {workspace_path}/memory/HISTORY.md"""
             system_prompt += f"\n\n## Current Session\nChannel: {channel}\nChat ID: {chat_id}"
         messages.append({"role": "system", "content": system_prompt})
 
-        # History
-        messages.extend(history)
+        # History (re-encode images for user messages that have media paths)
+        for h in history:
+            if h["role"] == "user" and h.get("media"):
+                h = {**h, "content": self._build_user_content(h["content"], h["media"])}
+                h.pop("media", None)
+            messages.append(h)
 
         # Current message (with optional image attachments)
         from datetime import datetime as _dt

@@ -485,7 +485,8 @@ class AgentLoop:
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
         logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)
 
-        session.add_message("user", msg.content)
+        session.add_message("user", msg.content,
+                             media=msg.media if msg.media else None)
         session.add_message("assistant", final_content,
                             tools_used=tools_used if tools_used else None)
         self.sessions.save(session)

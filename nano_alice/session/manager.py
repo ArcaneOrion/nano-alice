@@ -52,7 +52,7 @@ class Session:
                 ts = m["timestamp"][:16].replace("T", " ")  # YYYY-MM-DD HH:MM
                 content = f"[{ts}] {content}"
             entry: dict[str, Any] = {"role": m["role"], "content": content}
-            for k in ("tool_calls", "tool_call_id", "name"):
+            for k in ("tool_calls", "tool_call_id", "name", "media"):
                 if k in m:
                     entry[k] = m[k]
             out.append(entry)
