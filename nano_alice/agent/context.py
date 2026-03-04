@@ -160,7 +160,9 @@ To recall past events, grep {workspace_path}/memory/HISTORY.md"""
         messages.extend(history)
 
         # Current message (with optional image attachments)
-        user_content = self._build_user_content(current_message, media)
+        from datetime import datetime as _dt
+        ts = _dt.now().strftime("%Y-%m-%d %H:%M")
+        user_content = self._build_user_content(f"[{ts}] {current_message}", media)
         messages.append({"role": "user", "content": user_content})
 
         return messages
