@@ -13,56 +13,59 @@ if TYPE_CHECKING:
     from nano_alice.providers.base import LLMProvider
 
 _SYSTEM_PROMPT = """\
-You are a memory extraction agent. Your job is to analyze recent conversation \
-and maintain the memory files — both adding new information and cleaning up stale entries.
+You are a memory extraction agent. Analyze recent conversation and maintain memory files.
 
 ## Workspace
 Memory directory: {memory_dir}
 
+## Efficiency rules — IMPORTANT
+- **Batch tool calls**: call multiple tools in one round when possible (e.g. read 2 files at once).
+- **SCRATCH.md is append-only**: do NOT read it before appending. Use memory_search to check \
+for duplicates instead.
+- **Skip trivial conversations**: greetings, small talk, "1+1=?" → do NOT write anything, \
+just reply with a summary and STOP.
+- **Large files are tail-truncated**: read_file shows the header + the most recent content. \
+If you need older content, use memory_search.
+- **Finish quickly**: aim for ≤5 tool-call rounds. Stop as soon as writes are done.
+
 ## Instructions
 
-### Extract new information
-1. Read the conversation below carefully.
-2. Identify: facts, decisions, user preferences, project progress, lessons learned.
-3. Use memory_search to check if the information already exists — do NOT duplicate.
-   Keep each search query SHORT (5-10 words max, one topic per query).
-4. Decide where to write based on the two-tier structure:
+### 1. Decide if anything is worth recording
+Read the conversation. If it's only greetings/small talk/trivial Q&A, reply "Nothing notable" \
+and STOP (zero tool calls).
 
-   **MEMORY.md（主文件，每轮加载到 system prompt，≤5KB）**
-   - Core user facts and preferences
-   - System capabilities summary
-   - **File index table** — lists all sub-files and their purpose
+### 2. Check for duplicates
+Use memory_search (1-2 short queries, 5-10 words each) to see if the key facts already exist. \
+If they do, skip writing. Do NOT search more than twice.
 
-   **Sub-files（通过 RAG 按需召回）**
-   - `memory/schedule.md` — course schedule, class times
-   - `memory/projects.md` — active project status and TODOs
-   - `memory/lessons.md` — lessons learned, mistakes to avoid
-   - `memory/SCRATCH.md` — timestamped conversation summaries
-   - Other topic files as needed (create and add to MEMORY.md file index)
+### 3. Write to the right file
+**MEMORY.md（主文件，≤5KB，每轮全量注入 system prompt）**
+- Core user facts, preferences, capabilities summary, file index table.
+- Only add truly new long-term facts here.
 
-   Rule: if information is needed almost every conversation → MEMORY.md.
-   If it's detailed/topic-specific → sub-file.
+**Sub-files（通过 RAG 按需召回）**
+- `memory/schedule.md` — course schedule, class times
+- `memory/projects.md` — active project status and TODOs
+- `memory/lessons.md` — lessons learned, mistakes to avoid
+- `memory/SCRATCH.md` — timestamped conversation summaries (append-only!)
+- Other topic files as needed (create and add to MEMORY.md file index)
 
-5. For SCRATCH.md, use append_file (never overwrite). Format:
-   ### [YYYY-MM-DD HH:MM] Brief summary
-   - Key point 1
-   - Key point 2
-6. If nothing noteworthy happened (greetings, small talk), just append a brief note \
-to SCRATCH.md and STOP.
-7. Prefer edit_file over write_file for existing files (except SCRATCH.md).
-8. Do NOT record system errors, API failures, or LLM error messages as memories.
-9. When creating a new sub-file, add it to MEMORY.md's file index table.
+Rule: frequently needed → MEMORY.md. Detailed/topic-specific → sub-file.
 
-### Clean up stale information
-10. After extracting, check if any existing entries are NOW OUTDATED by the new conversation. \
-For example: a status changed, a preference was corrected, a task was completed, \
-or a config value was updated.
-11. If you find stale entries, use edit_file to update or remove them. \
-Do NOT leave contradictory information across files.
-12. Keep MEMORY.md ≤5KB. If it grows too large, move detailed/low-frequency info to \
-dedicated files (schedule.md, reminders.md, etc.) and add a pointer in MEMORY.md's file index.
+For SCRATCH.md, use **append_file only**. Format:
+```
+### [YYYY-MM-DD HH:MM] Brief summary
+- Key point 1
+- Key point 2
+```
 
-When done, stop calling tools — just reply with a short summary."""
+### 4. Clean up stale info (only if the conversation contradicts existing records)
+If a fact changed (status, preference, config), use edit_file to update it. \
+Do NOT proactively scan all files for staleness — only fix what the current conversation \
+explicitly contradicts. Keep MEMORY.md ≤5KB.
+
+### 5. Stop
+Reply with a one-line summary. Do NOT continue calling tools after writes are done."""
 
 _TOOLS = [
     {
@@ -295,11 +298,24 @@ class MemoryAgent:
             raise ValueError("Path escapes workspace")
         return resolved
 
+    _READ_LIMIT = 8000
+    _HEAD_KEEP = 500  # preserve file header/structure
+
     def _read_file(self, path: str) -> str:
         fp = self._resolve(path)
         if not fp.exists():
             return f"File not found: {path}"
-        return fp.read_text(encoding="utf-8")[:8000]
+        text = fp.read_text(encoding="utf-8")
+        if len(text) <= self._READ_LIMIT:
+            return text
+        # Large file: keep head (headers/structure) + tail (recent content)
+        tail_keep = self._READ_LIMIT - self._HEAD_KEEP
+        skipped = len(text) - self._READ_LIMIT
+        return (
+            text[:self._HEAD_KEEP]
+            + f"\n\n... [{skipped} chars truncated, use memory_search for full content] ...\n\n"
+            + text[-tail_keep:]
+        )
 
     def _write_file(self, path: str, content: str) -> str:
         fp = self._resolve(path)
