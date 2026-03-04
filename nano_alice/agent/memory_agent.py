@@ -31,7 +31,10 @@ If you need older content, use memory_search.
 ## Instructions
 
 ### 1. Decide if anything is worth recording
-Read the conversation. If it's only greetings/small talk/trivial Q&A, reply "Nothing notable" \
+Read the conversation. The input has two sections:
+- **Context** — already processed messages, for background understanding only. Do NOT extract from these.
+- **New Conversation** — unprocessed messages. Extract new information ONLY from this section.
+If the new conversation is only greetings/small talk/trivial Q&A, reply "Nothing notable" \
 and STOP (zero tool calls).
 
 ### 2. Check for duplicates
@@ -193,14 +196,11 @@ class MemoryAgent:
                 extra_headers=embeddings_config.extra_headers,
             )
 
-    async def run(self, recent_messages: list[dict]) -> None:
-        """Extract memory from recent messages. Runs silently in background."""
-        if not recent_messages:
-            return
-
-        # Format conversation for the subagent
+    @staticmethod
+    def _format_messages(messages: list[dict]) -> str:
+        """Format a list of messages into readable text."""
         lines = []
-        for m in recent_messages:
+        for m in messages:
             content = m.get("content", "")
             if not content:
                 continue
@@ -208,16 +208,66 @@ class MemoryAgent:
             ts = m.get("timestamp", "")[:16]
             prefix = f"[{ts}] " if ts else ""
             lines.append(f"{prefix}{role}: {content}")
+        return "\n".join(lines)
 
-        if not lines:
+    async def run(
+        self,
+        new_messages: list[dict],
+        context_messages: list[dict] | None = None,
+        cleanup_scratch: bool = False,
+        memory_priority: str = "normal",
+    ) -> None:
+        """Extract memory from recent messages. Runs silently in background.
+
+        Args:
+            new_messages: Messages that haven't been processed yet (extract from these).
+            context_messages: Optional older messages for background understanding (read-only).
+            cleanup_scratch: If True, also clean up SCRATCH.md (compress entries older than 48h).
+            memory_priority: "high" if user explicitly asked to remember something.
+        """
+        if not new_messages:
             return
 
-        conversation_text = "\n".join(lines)
+        # Format context section (already processed, for reference only)
+        sections: list[str] = []
+        if context_messages:
+            ctx_lines = self._format_messages(context_messages)
+            if ctx_lines:
+                sections.append(
+                    "## Context (already processed, for reference only)\n\n" + ctx_lines
+                )
+
+        # Format new conversation section (extract from this)
+        new_lines = self._format_messages(new_messages)
+        if not new_lines:
+            return
+
+        new_header = "## New Conversation (extract from this)\n"
+        if memory_priority == "high":
+            new_header += (
+                "\n**PRIORITY: HIGH** — 用户明确要求记住某些信息，"
+                "务必写入记忆文件，不要跳过。\n"
+            )
+        sections.append(new_header + "\n" + new_lines)
+
+        conversation_text = "\n\n".join(sections)
         system = _SYSTEM_PROMPT.format(memory_dir=self._memory_dir)
+
+        if cleanup_scratch:
+            system += (
+                "\n\n## SCRATCH.md Cleanup Task\n"
+                "SCRATCH.md hasn't been cleaned in over 48 hours. After processing new messages:\n"
+                "1. Read memory/SCRATCH.md\n"
+                "2. Entries older than 48 hours → compress into a brief monthly summary "
+                "(one `### [YYYY-MM] Month Summary` section per month)\n"
+                "3. Keep entries from the last 48 hours as-is\n"
+                "4. Use write_file to write the cleaned version back\n"
+                "If SCRATCH.md doesn't exist or is small (<1KB), skip cleanup."
+            )
 
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": system},
-            {"role": "user", "content": f"## Recent Conversation\n\n{conversation_text}"},
+            {"role": "user", "content": conversation_text},
         ]
 
         for iteration in range(self.MAX_ITERATIONS):

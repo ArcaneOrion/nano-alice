@@ -39,6 +39,12 @@ _NON_RETRYABLE_PATTERNS = (
     "invalid api key", "invalid_api_key", "Unauthorized",
 )
 
+# Keywords indicating user explicitly wants something remembered
+_MEMORY_HIGH_KEYWORDS = (
+    "记住", "别忘了", "记下", "记一下", "记录一下",
+    "remember", "don't forget", "note that", "keep in mind",
+)
+
 
 class AgentLoop:
     """
@@ -136,6 +142,7 @@ class AgentLoop:
                 model=embeddings_config.model,
                 dimensions=embeddings_config.dimensions,
                 extra_headers=embeddings_config.extra_headers,
+                min_score=embeddings_config.rag_min_score,
             )
 
         self._register_default_tools()
@@ -487,7 +494,10 @@ class AgentLoop:
         is_heartbeat = session_key == "heartbeat" or msg.content.startswith("Read HEARTBEAT.md")
         is_cron = msg.sender_id == "cron"
         if self._memory_agent_enabled and msg.channel != "system" and not is_heartbeat and not is_cron:
-            task = asyncio.create_task(self._run_memory_agent(session))
+            # Detect explicit memory keywords for priority signal
+            msg_lower = msg.content.lower()
+            memory_priority = "high" if any(kw in msg_lower for kw in _MEMORY_HIGH_KEYWORDS) else "normal"
+            task = asyncio.create_task(self._run_memory_agent(session, memory_priority=memory_priority))
             self._pending_tasks.append(task)
 
         if message_tool := self.tools.get("message"):
@@ -505,13 +515,36 @@ class AgentLoop:
             session, archive_all=archive_all, memory_window=self.memory_window,
         )
 
-    async def _run_memory_agent(self, session: Session) -> None:
+    async def _run_memory_agent(self, session: Session, memory_priority: str = "normal") -> None:
         """Run memory subagent in background to extract memories."""
+        import time as _time
+
         from nano_alice.agent.memory_agent import MemoryAgent
 
-        recent = session.messages[-10:]  # last 5 turns (user + assistant)
-        if not recent:
+        total = len(session.messages)
+        cursor = session.last_memory_processed
+
+        # Clamp stale cursor (e.g. after external edits)
+        if cursor > total:
+            cursor = max(0, total - 10)
+
+        new_messages = session.messages[cursor:]
+        if not new_messages:
             return
+
+        # Up to 6 messages before cursor as read-only context (3 turns)
+        context_start = max(0, cursor - 6)
+        context_messages = session.messages[context_start:cursor] if cursor > 0 else None
+
+        # Check if SCRATCH.md cleanup is due (48h)
+        cleanup_scratch = False
+        if self._memory_index:
+            try:
+                last_cleanup = self._memory_index.get_scratch_last_cleanup()
+                if _time.time() - last_cleanup > 48 * 3600:
+                    cleanup_scratch = True
+            except Exception:
+                pass
 
         agent = MemoryAgent(
             provider=self._memory_provider,
@@ -520,9 +553,24 @@ class AgentLoop:
             embeddings_config=self.embeddings_config,
         )
         try:
-            await agent.run(recent)
+            await agent.run(
+                new_messages,
+                context_messages=context_messages,
+                cleanup_scratch=cleanup_scratch,
+                memory_priority=memory_priority,
+            )
+            # Success: advance cursor and persist
+            session.last_memory_processed = total
+            self.sessions.save(session)
+            # Update scratch cleanup timestamp on success
+            if cleanup_scratch and self._memory_index:
+                try:
+                    self._memory_index.set_scratch_last_cleanup(_time.time())
+                except Exception:
+                    pass
         except Exception as e:
             logger.error("Memory agent failed: {}", e)
+            # Cursor not advanced — next run will retry the same messages
 
     async def process_direct(
         self,

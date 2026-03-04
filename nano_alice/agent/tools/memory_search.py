@@ -26,18 +26,21 @@ class _MemoryIndex:
     """Lazy-loaded, incrementally-updated embedding index stored as JSON."""
 
     def __init__(self, memory_dir: Path, api_base: str, api_key: str,
-                 model: str, dimensions: int, extra_headers: dict[str, str]):
+                 model: str, dimensions: int, extra_headers: dict[str, str],
+                 min_score: float = 0.0):
         self._memory_dir = memory_dir
         self._api_base = api_base.rstrip("/")
         self._api_key = api_key
         self._model = model
         self._dimensions = dimensions
         self._extra_headers = extra_headers
+        self._min_score = min_score
 
         self._index_path = memory_dir / ".index.json"
         self._chunks: list[_Chunk] = []
         self._embeddings: list[list[float]] = []
         self._file_mtimes: dict[str, float] = {}
+        self._scratch_last_cleanup: float = 0.0
         self._config_hash = f"{model}:{dimensions}"
         self._loaded = False
 
@@ -55,6 +58,7 @@ class _MemoryIndex:
                 logger.info("Embedding config changed, rebuilding index")
                 return
             self._file_mtimes = data.get("file_mtimes", {})
+            self._scratch_last_cleanup = data.get("scratch_last_cleanup", 0.0)
             for entry in data.get("chunks", []):
                 self._chunks.append(_Chunk(
                     source=entry["source"],
@@ -82,6 +86,7 @@ class _MemoryIndex:
         data = {
             "config_hash": self._config_hash,
             "file_mtimes": self._file_mtimes,
+            "scratch_last_cleanup": self._scratch_last_cleanup,
             "chunks": entries,
         }
         self._index_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
@@ -170,6 +175,17 @@ class _MemoryIndex:
 
     _UPDATE_COOLDOWN = 300  # seconds — skip re-embedding a file if indexed <5min ago
     _SCRATCH_TAIL_CHARS = 8000  # only index the tail of SCRATCH.md
+
+    def get_scratch_last_cleanup(self) -> float:
+        """Return the timestamp of the last SCRATCH.md cleanup."""
+        self._load()
+        return self._scratch_last_cleanup
+
+    def set_scratch_last_cleanup(self, ts: float) -> None:
+        """Update and persist the SCRATCH.md cleanup timestamp."""
+        self._load()
+        self._scratch_last_cleanup = ts
+        self._save()
 
     async def _update(self) -> None:
         """Check for changed files and re-embed only dirty chunks."""
@@ -262,6 +278,8 @@ class _MemoryIndex:
         scored = []
         for i, (chunk, emb) in enumerate(zip(self._chunks, self._embeddings)):
             sim = self._cosine_similarity(query_emb, emb)
+            if sim < self._min_score:
+                continue
             scored.append((sim, i, chunk))
 
         scored.sort(key=lambda x: x[0], reverse=True)

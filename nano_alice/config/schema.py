@@ -282,6 +282,7 @@ class EmbeddingsConfig(Base):
     model: str = ""             # e.g. "Qwen/Qwen3-Embedding-4B"
     dimensions: int = 0         # 0 = use model default (don't send dimensions param)
     extra_headers: dict[str, str] = Field(default_factory=dict)
+    rag_min_score: float = 0.35  # Minimum cosine similarity for RAG injection (0.0 = no filter)
 
 
 class ToolsConfig(Base):
