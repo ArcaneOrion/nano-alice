@@ -45,7 +45,12 @@ class Session:
         """Get recent messages in LLM format, preserving tool metadata."""
         out: list[dict[str, Any]] = []
         for m in self.messages[-max_messages:]:
-            entry: dict[str, Any] = {"role": m["role"], "content": m.get("content", "")}
+            content = m.get("content", "")
+            # 为 user 消息添加时间戳前缀，帮助 LLM 感知时间流逝
+            if m["role"] == "user" and content and m.get("timestamp"):
+                ts = m["timestamp"][:16].replace("T", " ")  # YYYY-MM-DD HH:MM
+                content = f"[{ts}] {content}"
+            entry: dict[str, Any] = {"role": m["role"], "content": content}
             for k in ("tool_calls", "tool_call_id", "name"):
                 if k in m:
                     entry[k] = m[k]

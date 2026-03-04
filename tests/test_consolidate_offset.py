@@ -108,7 +108,7 @@ class TestSessionImmutableHistory:
 
         history = session.get_history(max_messages=6)
         assert len(history) == 6
-        assert history[0]["content"] == "msg7"
+        assert history[0]["content"].endswith("msg7")
         assert history[-1]["content"] == "resp9"
 
     def test_get_history_with_all_messages(self) -> None:
@@ -116,7 +116,7 @@ class TestSessionImmutableHistory:
         session = create_session_with_messages("test:all", 5)
         history = session.get_history(max_messages=100)
         assert len(history) == 5
-        assert history[0]["content"] == "msg0"
+        assert history[0]["content"].endswith("msg0")
 
     def test_get_history_stable_for_same_session(self) -> None:
         """Test that get_history returns same content for same max_messages."""
@@ -163,8 +163,8 @@ class TestSessionPersistence:
         session2 = temp_manager.get_or_create("test:reload")
         history = session2.get_history(max_messages=10)
         assert len(history) == 10
-        assert history[0]["content"] == "msg20"
-        assert history[-1]["content"] == "msg29"
+        assert history[0]["content"].endswith("msg20")
+        assert history[-1]["content"].endswith("msg29")
 
     def test_clear_resets_session(self, temp_manager):
         """Test that clear() properly resets session."""
