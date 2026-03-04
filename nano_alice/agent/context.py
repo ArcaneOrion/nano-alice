@@ -202,7 +202,7 @@ To recall past events, grep {workspace_path}/memory/HISTORY.md"""
         messages: list[dict[str, Any]],
         tool_call_id: str,
         tool_name: str,
-        result: str
+        result: str | list
     ) -> list[dict[str, Any]]:
         """
         Add a tool result to the message list.

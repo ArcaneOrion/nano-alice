@@ -1,6 +1,8 @@
 """File system tools: read, write, edit."""
 
+import base64
 import difflib
+import mimetypes
 from pathlib import Path
 from typing import Any
 
@@ -31,7 +33,7 @@ class ReadFileTool(Tool):
     
     @property
     def description(self) -> str:
-        return "Read the contents of a file at the given path."
+        return "Read the contents of a file. For image files (jpg/png/gif/webp), returns the image for visual inspection."
     
     @property
     def parameters(self) -> dict[str, Any]:
@@ -46,13 +48,25 @@ class ReadFileTool(Tool):
             "required": ["path"]
         }
     
-    async def execute(self, path: str, **kwargs: Any) -> str:
+    async def execute(self, path: str, **kwargs: Any) -> str | list:
         try:
             file_path = _resolve_path(path, self._workspace, self._allowed_dir)
             if not file_path.exists():
                 return f"Error: File not found: {path}"
             if not file_path.is_file():
                 return f"Error: Not a file: {path}"
+
+            mime, _ = mimetypes.guess_type(str(file_path))
+            if mime and mime.startswith("image/"):
+                size = file_path.stat().st_size
+                if size > 10 * 1024 * 1024:
+                    return f"Error: Image too large ({size // 1024 // 1024}MB), max 10MB"
+                b64 = base64.b64encode(file_path.read_bytes()).decode()
+                size_kb = size / 1024
+                return [
+                    {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
+                    {"type": "text", "text": f"Image: {file_path.name} ({size_kb:.0f}KB)"},
+                ]
 
             content = file_path.read_text(encoding="utf-8")
             return content
