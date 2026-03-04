@@ -337,6 +337,31 @@ def _make_memory_provider(config: Config):
     return _make_provider(config, memory_cfg.model)
 
 
+def _setup_logging(enable_console: bool = False) -> None:
+    """配置 loguru 日志：文件持久化 + 可选控制台输出。"""
+    from loguru import logger
+    from nano_alice.config.loader import get_data_dir
+
+    log_dir = get_data_dir() / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    # 文件日志：始终开启，按大小轮转，保留最近 7 天
+    logger.add(
+        log_dir / "nano-alice.log",
+        rotation="10 MB",
+        retention="7 days",
+        compression="gz",
+        level="DEBUG",
+        format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level:<8} | {name}:{function}:{line} | {message}",
+        filter="nano_alice",
+    )
+
+    if enable_console:
+        logger.enable("nano_alice")
+    else:
+        logger.disable("nano_alice")
+
+
 # ============================================================================
 # Gateway / Server
 # ============================================================================
@@ -357,10 +382,8 @@ def gateway(
     from nano_alice.cron.types import CronJob
     from nano_alice.heartbeat.service import HeartbeatService
     
-    if verbose:
-        import logging
-        logging.basicConfig(level=logging.DEBUG)
-    
+    _setup_logging(enable_console=verbose)
+
     console.print(f"{__logo__} Starting nano-alice gateway on port {port}...")
     
     config = load_config()
@@ -478,7 +501,6 @@ def agent(
     from nano_alice.bus.queue import MessageBus
     from nano_alice.agent.loop import AgentLoop
     from nano_alice.cron.service import CronService
-    from loguru import logger
     
     config = load_config()
 
@@ -492,10 +514,7 @@ def agent(
     # Memory subagent provider
     memory_provider = _make_memory_provider(config)
 
-    if logs:
-        logger.enable("nano_alice")
-    else:
-        logger.disable("nano_alice")
+    _setup_logging(enable_console=logs)
 
     agent_loop = AgentLoop(
         bus=bus,

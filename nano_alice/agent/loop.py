@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import TYPE_CHECKING, Awaitable, Callable
@@ -240,6 +241,7 @@ class AgentLoop:
         """调用 LLM，遇到可重试错误自动退避重试。"""
         response: LLMResponse | None = None
         for attempt in range(_LLM_MAX_RETRIES + 1):  # 0..MAX_RETRIES
+            t0 = time.perf_counter()
             response = await self.provider.chat(
                 messages=messages,
                 tools=tools,
@@ -247,9 +249,18 @@ class AgentLoop:
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
             )
+            elapsed = time.perf_counter() - t0
 
             # 正常返回
             if response.finish_reason != "error":
+                usage = response.usage or {}
+                logger.info(
+                    "LLM call: model={} | {:.1f}s | prompt={} compl={} total={}",
+                    self.model, elapsed,
+                    usage.get("prompt_tokens", 0),
+                    usage.get("completion_tokens", 0),
+                    usage.get("total_tokens", 0),
+                )
                 return response
 
             error_text = response.content or ""
@@ -278,17 +289,24 @@ class AgentLoop:
         self,
         initial_messages: list[dict],
         on_progress: Callable[[str], Awaitable[None]] | None = None,
-    ) -> tuple[str | None, list[str]]:
-        """Run the agent iteration loop. Returns (final_content, tools_used)."""
+    ) -> tuple[str | None, list[str], dict[str, int]]:
+        """Run the agent iteration loop. Returns (final_content, tools_used, token_usage)."""
         messages = initial_messages
         iteration = 0
         final_content = None
         tools_used: list[str] = []
+        total_usage: dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        loop_t0 = time.perf_counter()
 
         while iteration < self.max_iterations:
             iteration += 1
 
             response = await self._chat_with_retry(messages, self.tools.get_definitions())
+
+            # Accumulate token usage
+            if response.usage:
+                for k in total_usage:
+                    total_usage[k] += response.usage.get(k, 0)
 
             if response.has_tool_calls:
                 if on_progress:
@@ -327,7 +345,13 @@ class AgentLoop:
                     logger.error("LLM returned error after retries: {}", (final_content or "")[:200])
                 break
 
-        return final_content, tools_used
+        loop_elapsed = time.perf_counter() - loop_t0
+        logger.info(
+            "Agent loop done: {} iterations | {:.1f}s | prompt={} compl={} total={}",
+            iteration, loop_elapsed,
+            total_usage["prompt_tokens"], total_usage["completion_tokens"], total_usage["total_tokens"],
+        )
+        return final_content, tools_used, total_usage
 
     async def run(self) -> None:
         """Run the agent loop, processing messages from the bus."""
@@ -399,7 +423,7 @@ class AgentLoop:
                 history=session.get_history(max_messages=self.memory_window),
                 current_message=msg.content, channel=channel, chat_id=chat_id,
             )
-            final_content, _ = await self._run_agent_loop(messages)
+            final_content, _, _ = await self._run_agent_loop(messages)
             session.add_message("user", f"[System: {msg.sender_id}] {msg.content}")
             session.add_message("assistant", final_content or "Background task completed.")
             self.sessions.save(session)
@@ -475,7 +499,7 @@ class AgentLoop:
                 channel=msg.channel, chat_id=msg.chat_id, content=content, metadata=meta,
             ))
 
-        final_content, tools_used = await self._run_agent_loop(
+        final_content, tools_used, token_usage = await self._run_agent_loop(
             initial_messages, on_progress=on_progress or _bus_progress,
         )
 
@@ -505,9 +529,12 @@ class AgentLoop:
             if isinstance(message_tool, MessageTool) and message_tool._sent_in_turn:
                 return None
 
+        meta = dict(msg.metadata or {})
+        if token_usage and any(v > 0 for v in token_usage.values()):
+            meta["token_usage"] = token_usage
         return OutboundMessage(
             channel=msg.channel, chat_id=msg.chat_id, content=final_content,
-            metadata=msg.metadata or {},
+            metadata=meta,
         )
 
     async def _consolidate_memory(self, session, archive_all: bool = False) -> None:

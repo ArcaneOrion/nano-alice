@@ -627,7 +627,21 @@ class FeishuChannel(BaseChannel):
                         )
 
             if msg.content and msg.content.strip():
-                card = {"config": {"wide_screen_mode": True}, "elements": self._build_card_elements(msg.content)}
+                elements = self._build_card_elements(msg.content)
+                # 从 metadata 提取 token 用量，追加为卡片 note 脚注
+                token_usage = msg.metadata.get("token_usage") if msg.metadata else None
+                if token_usage and not msg.metadata.get("_progress"):
+                    total = token_usage.get("total_tokens", 0)
+                    if total > 0:
+                        prompt = token_usage.get("prompt_tokens", 0)
+                        compl = token_usage.get("completion_tokens", 0)
+                        elements.append({"tag": "hr"})
+                        elements.append({
+                            "tag": "note",
+                            "elements": [{"tag": "plain_text",
+                                          "content": f"Tokens: {prompt} + {compl} = {total}"}],
+                        })
+                card = {"config": {"wide_screen_mode": True}, "elements": elements}
                 await loop.run_in_executor(
                     None, self._send_message_sync,
                     receive_id_type, msg.chat_id, "interactive", json.dumps(card, ensure_ascii=False),

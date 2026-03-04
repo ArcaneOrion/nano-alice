@@ -6,6 +6,8 @@ import platform
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+
 from nano_alice.agent.memory import MemoryStore
 from nano_alice.agent.skills import SkillsLoader
 
@@ -73,8 +75,10 @@ Skills with available="false" need dependencies installed first - you can try in
 
 {skills_summary}""")
         
-        return "\n\n---\n\n".join(parts)
-    
+        result = "\n\n---\n\n".join(parts)
+        logger.debug("system prompt: {} parts, {} chars", len(parts), len(result))
+        return result
+
     def _get_identity(self) -> str:
         """Get the core identity section."""
         from datetime import datetime
@@ -114,13 +118,16 @@ To recall past events, grep {workspace_path}/memory/HISTORY.md"""
     def _load_bootstrap_files(self) -> str:
         """Load all bootstrap files from workspace."""
         parts = []
-        
+        loaded = []
+
         for filename in self.BOOTSTRAP_FILES:
             file_path = self.workspace / filename
             if file_path.exists():
                 content = file_path.read_text(encoding="utf-8")
                 parts.append(f"## {filename}\n\n{content}")
-        
+                loaded.append(filename)
+
+        logger.debug("bootstrap files loaded: {}", loaded)
         return "\n\n".join(parts) if parts else ""
     
     def build_messages(
@@ -169,6 +176,7 @@ To recall past events, grep {workspace_path}/memory/HISTORY.md"""
         user_content = self._build_user_content(f"[{ts}] {current_message}", media)
         messages.append({"role": "user", "content": user_content})
 
+        logger.debug("build_messages: history={}, media={}", len(history), len(media) if media else 0)
         return messages
 
     def _build_user_content(self, text: str, media: list[str] | None) -> str | list[dict[str, Any]]:

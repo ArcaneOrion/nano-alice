@@ -2,6 +2,8 @@
 
 import asyncio
 
+from loguru import logger
+
 from nano_alice.bus.events import InboundMessage, OutboundMessage
 
 
@@ -19,19 +21,25 @@ class MessageBus:
 
     async def publish_inbound(self, msg: InboundMessage) -> None:
         """Publish a message from a channel to the agent."""
+        logger.debug("publish_inbound: channel={}, sender={}", msg.channel, msg.sender_id)
         await self.inbound.put(msg)
 
     async def consume_inbound(self) -> InboundMessage:
         """Consume the next inbound message (blocks until available)."""
-        return await self.inbound.get()
+        msg = await self.inbound.get()
+        logger.debug("consume_inbound: channel={}, sender={}", msg.channel, msg.sender_id)
+        return msg
 
     async def publish_outbound(self, msg: OutboundMessage) -> None:
         """Publish a response from the agent to channels."""
+        logger.debug("publish_outbound: channel={}, chat_id={}", msg.channel, msg.chat_id)
         await self.outbound.put(msg)
 
     async def consume_outbound(self) -> OutboundMessage:
         """Consume the next outbound message (blocks until available)."""
-        return await self.outbound.get()
+        msg = await self.outbound.get()
+        logger.debug("consume_outbound: channel={}, chat_id={}", msg.channel, msg.chat_id)
+        return msg
 
     @property
     def inbound_size(self) -> int:

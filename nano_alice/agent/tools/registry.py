@@ -1,6 +1,9 @@
 """Tool registry for dynamic tool management."""
 
+import time
 from typing import Any
+
+from loguru import logger
 
 from nano_alice.agent.tools.base import Tool
 
@@ -51,14 +54,21 @@ class ToolRegistry:
         """
         tool = self._tools.get(name)
         if not tool:
+            logger.warning("Tool not found: {}", name)
             return f"Error: Tool '{name}' not found"
 
         try:
             errors = tool.validate_params(params)
             if errors:
+                logger.warning("Tool '{}' param validation failed: {}", name, "; ".join(errors))
                 return f"Error: Invalid parameters for tool '{name}': " + "; ".join(errors)
-            return await tool.execute(**params)
+            t0 = time.perf_counter()
+            result = await tool.execute(**params)
+            elapsed = time.perf_counter() - t0
+            logger.debug("Tool '{}' executed in {:.2f}s, result length={}", name, elapsed, len(result))
+            return result
         except Exception as e:
+            logger.error("Tool '{}' raised exception: {}", name, e)
             return f"Error executing {name}: {str(e)}"
     
     @property
