@@ -394,7 +394,7 @@ def gateway(
     from nano_alice.cron.types import CronJob
     from nano_alice.heartbeat.service import HeartbeatService
     
-    _setup_logging(enable_console=verbose, console_level="DEBUG" if verbose else "INFO")
+    _setup_logging(enable_console=True, console_level="DEBUG" if verbose else "INFO")
 
     # 第三方库（litellm 等）使用 stdlib logging，verbose 时也开启
     if verbose:
