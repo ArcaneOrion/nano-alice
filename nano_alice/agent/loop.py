@@ -366,9 +366,14 @@ class AgentLoop:
                     timeout=1.0
                 )
                 try:
-                    response = await self._process_message(msg)
+                    sk = msg.metadata.get("_session_key")
+                    response = await self._process_message(msg, session_key=sk)
                     if response is not None:
-                        await self.bus.publish_outbound(response)
+                        # Suppress HEARTBEAT_OK from being sent to user
+                        if sk == "heartbeat" and "HEARTBEAT" in (response.content or "").upper():
+                            logger.info("Heartbeat: OK (no action needed)")
+                        else:
+                            await self.bus.publish_outbound(response)
                     elif msg.channel == "cli":
                         await self.bus.publish_outbound(OutboundMessage(
                             channel=msg.channel, chat_id=msg.chat_id, content="", metadata=msg.metadata or {},

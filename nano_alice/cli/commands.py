@@ -451,11 +451,19 @@ def gateway(
 
     # Create heartbeat service
     async def on_heartbeat(prompt: str, channel: str, chat_id: str) -> str:
-        """Execute heartbeat through the agent."""
-        return await agent.process_direct(
-            prompt, session_key="heartbeat",
-            channel=channel or "cli", chat_id=chat_id or "direct",
-        )
+        """Publish heartbeat as inbound message so run() dispatches the response."""
+        from nano_alice.bus.events import InboundMessage
+        if channel and chat_id:
+            await bus.publish_inbound(InboundMessage(
+                channel=channel,
+                sender_id="heartbeat",
+                chat_id=chat_id,
+                content=prompt,
+                metadata={"_session_key": "heartbeat"},
+            ))
+            return ""
+        # No target channel — fall back to process_direct (response not dispatched)
+        return await agent.process_direct(prompt, session_key="heartbeat")
 
     hb_cfg = config.heartbeat
     # Auto-detect notify target from first enabled channel if not configured
