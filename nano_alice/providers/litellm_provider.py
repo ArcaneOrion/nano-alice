@@ -5,6 +5,11 @@ import json_repair
 import os
 from typing import Any
 
+# Patch httpx to allow UTF-8 in response headers (needed for some proxy servers)
+from nano_alice.utils import patch_httpx_for_utf8_headers
+
+patch_httpx_for_utf8_headers()
+
 import litellm
 from litellm import acompletion
 

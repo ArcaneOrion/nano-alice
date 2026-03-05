@@ -4,6 +4,32 @@ from pathlib import Path
 from datetime import datetime
 
 
+def patch_httpx_for_utf8_headers() -> None:
+    """
+    Patch httpx to allow UTF-8 characters in response headers.
+
+    Some proxy servers (e.g., elysiver.h-e.top) return headers containing
+    non-ASCII characters (Chinese comments), which httpx 0.28.1 rejects by
+    default because it enforces ASCII-only headers per HTTP spec.
+
+    This monkey-patches httpx._models._normalize_header_value to use UTF-8
+    instead of ASCII, allowing such responses to be processed.
+    """
+    try:
+        import httpx._models as models
+
+        def patched_normalize(value, encoding=None):
+            # Handle bytes directly - just return as-is
+            if isinstance(value, bytes):
+                return value
+            # Force UTF-8 encoding to handle non-ASCII characters in headers
+            return value.encode(encoding or "utf-8")
+
+        models._normalize_header_value = patched_normalize
+    except ImportError:
+        pass  # httpx not installed, nothing to patch
+
+
 def ensure_dir(path: Path) -> Path:
     """Ensure a directory exists, creating it if necessary."""
     path.mkdir(parents=True, exist_ok=True)
@@ -18,10 +44,10 @@ def get_data_path() -> Path:
 def get_workspace_path(workspace: str | None = None) -> Path:
     """
     Get the workspace path.
-    
+
     Args:
         workspace: Optional workspace path. Defaults to ~/.nano-alice/workspace.
-    
+
     Returns:
         Expanded and ensured workspace path.
     """
@@ -67,10 +93,10 @@ def safe_filename(name: str) -> str:
 def parse_session_key(key: str) -> tuple[str, str]:
     """
     Parse a session key into channel and chat_id.
-    
+
     Args:
         key: Session key in format "channel:chat_id"
-    
+
     Returns:
         Tuple of (channel, chat_id)
     """
