@@ -20,7 +20,7 @@
 | `nano_alice/agent/context.py` | System prompt 组装（引导文件 + 记忆 + 技能） |
 | `nano_alice/agent/memory.py` | 两层记忆（MEMORY.md 长期事实 + HISTORY.md 事件日志） |
 | `nano_alice/agent/memory_agent.py` | 记忆子代理，每轮对话后台提取信息写入记忆 |
-| `nano_alice/agent/tools/` | 内置工具（文件、Shell、Web、消息、Cron、MCP 等） |
+| `nano_alice/agent/tools/` | 内置工具（文件、Shell、Web、消息、Cron、MCP 等；`read_file` 支持图片） |
 | `nano_alice/agent/skills.py` | 技能加载器（内置 + workspace 自定义） |
 | `nano_alice/bus/` | 消息总线（inbound/outbound 队列） |
 | `nano_alice/channels/` | 聊天频道适配器 |
@@ -44,6 +44,9 @@
 | `MEMORY.md` | 核心事实和偏好（每轮全量注入 system prompt） |
 | `HISTORY.md` | 追加式事件日志 |
 | `SCRATCH.md` | 每轮对话概要 |
+| `schedule.md` | 课程表、作息时间 |
+| `projects.md` | 活跃项目状态 |
+| `lessons.md` | 经验教训 |
 | `YYYY-MM-DD.md` | 每日日志 |
 
 ## 安装
@@ -135,6 +138,24 @@ nano-alice onboard
 }
 ```
 
+### 心跳配置
+
+心跳服务定期唤醒 agent 执行 `HEARTBEAT.md` 中的指令，可配置将结果发送到指定频道：
+
+```json
+{
+  "heartbeat": {
+    "enabled": true,
+    "intervalS": 1800,
+    "notifyChannel": "feishu",
+    "notifyChatId": "ou_xxxxxx"
+  }
+}
+```
+
+- `notifyChannel` + `notifyChatId`：心跳结果自动发送到指定频道和用户（不配置则只执行不通知）
+- 心跳通过 `MessageBus` 路由，使用独立会话，不影响用户对话
+
 ### MCP 集成
 
 配置格式兼容 Claude Desktop / Cursor：
@@ -189,6 +210,11 @@ nano-alice gateway
 ```
 
 启动后自动连接所有已启用的频道，并运行定时任务和心跳服务。
+
+### 日志
+
+- 文件日志始终写入 `~/.nano-alice/logs/nano-alice.log`（10MB 轮转，保留 7 天，gzip 压缩）
+- `--verbose`（gateway）/ `--logs`（agent）仅控制是否在控制台输出日志
 
 ### 定时任务
 

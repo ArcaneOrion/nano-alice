@@ -52,7 +52,7 @@ Channel ← OutboundMessage ← MessageBus ← AgentLoop ← 工具执行循环
 
 ### 核心引擎
 
-- **`nano_alice/agent/loop.py`** — `AgentLoop`：骨架。`_run_agent_loop()` 是核心 while 循环：调用 LLM → 检查 tool_calls → 执行 → 重复，直到 `finish_reason != tool_calls` 或达到 `max_iterations`。`process_direct()` 用于 CLI/cron，`run()` 用于 gateway 模式——两者共用 `_process_message()` → `_run_agent_loop()`。
+- **`nano_alice/agent/loop.py`** — `AgentLoop`：骨架。`_run_agent_loop()` 是核心 while 循环：调用 LLM → 检查 tool_calls → 执行 → 重复，直到 `finish_reason != tool_calls` 或达到 `max_iterations`。`process_direct()` 用于 CLI/cron，`run()` 用于 gateway 模式——两者共用 `_process_message()` → `_run_agent_loop()`。`run()` 通过 `msg.metadata.get("_session_key")` 支持自定义会话路由（如心跳用独立会话）。
 - **`nano_alice/agent/context.py`** — `ContextBuilder`：从引导文件（AGENTS.md, SOUL.md, USER.md, TOOLS.md）、记忆、技能组装 system prompt。为 LLM 调用构建消息列表。
 
 ### 记忆系统（v2：被动式记忆管理 + RAG 注入）
@@ -117,13 +117,13 @@ Channel ← OutboundMessage ← MessageBus ← AgentLoop ← 工具执行循环
 
 ### 工具
 
-- **`nano_alice/agent/tools/base.py`** — `Tool` ABC：所有工具实现 `name`, `description`, `parameters`（JSON Schema）和 `execute()`。内置参数校验 `validate_params()`。
+- **`nano_alice/agent/tools/base.py`** — `Tool` ABC：所有工具实现 `name`, `description`, `parameters`（JSON Schema）和 `execute()`（返回 `str | list`）。内置参数校验 `validate_params()`。
 - **`nano_alice/agent/tools/registry.py`** — `ToolRegistry`：动态工具注册和执行。通过 `to_schema()` 生成 OpenAI 格式工具定义。
 - **`nano_alice/agent/tools/memory_search.py`** — `MemorySearchTool` + `_MemoryIndex`：基于 embedding 的语义搜索。`_MemoryIndex` 同时被 RAG 注入和 memory subagent 复用。索引所有 `memory/*.md` 文件。
 - 内置工具：`filesystem.py`（read/write/edit/list）, `shell.py`（exec）, `web.py`（search/fetch）, `message.py`（发送到频道）, `spawn.py`（后台子 agent）, `cron.py`（定时任务）, `mcp.py`（MCP 集成）。
 
 **添加新工具：**
-1. 创建继承 `Tool` 的类，实现 `name`, `description`, `parameters`（JSON Schema dict）和 `async execute(**kwargs) -> str`。
+1. 创建继承 `Tool` 的类，实现 `name`, `description`, `parameters`（JSON Schema dict）和 `async execute(**kwargs) -> str | list`。
 2. 在 `AgentLoop._register_default_tools()` 中注册。
 3. 需要运行时上下文的工具（channel, chat_id）实现 `set_context()` 并在 `AgentLoop._set_tool_context()` 中调用。
 
@@ -175,6 +175,15 @@ Channel ← OutboundMessage ← MessageBus ← AgentLoop ← 工具执行循环
 1. **`nano-alice agent`** — 直接 CLI 交互。创建 `AgentLoop`，调用 `process_direct()`。退出前调用 `await_pending()` 等待后台任务（memory subagent 等）完成。
 2. **`nano-alice gateway`** — 长运行服务器。并发启动 `AgentLoop.run()`、`ChannelManager`、`CronService`、`HeartbeatService`。`HeartbeatService` 每 30 分钟唤醒 agent 读取 `HEARTBEAT.md`。
 
+### 心跳服务
+
+`HeartbeatService` 定期唤醒 agent 执行 `HEARTBEAT.md` 中的指令。
+
+- 配置类：`HeartbeatConfig`（`schema.py`），字段：`enabled`（默认 true）、`interval_s`（默认 1800）、`notify_channel`、`notify_chat_id`
+- 心跳通过 `MessageBus` 路由：构造 `InboundMessage`（`channel="heartbeat"`），设置 `metadata["_session_key"]` 使 `AgentLoop.run()` 使用独立会话
+- 当配置了 `notify_channel` + `notify_chat_id` 时，心跳结果自动发送到指定频道（如飞书）
+- 自动检测可用频道；agent 回复中的 `HEARTBEAT_OK` 被过滤不发送
+
 ### Bridge
 
 `bridge/` 是 WhatsApp 频道的 Node.js TypeScript 项目（基于 Baileys）。独立构建 `npm install && npm run build`。强制包含在 wheel 的 `nano_alice/bridge` 中。
@@ -192,6 +201,11 @@ MCP 服务器在 `config.tools.mcp_servers` 中配置。两种传输：stdio（`
 - 测试 mock 文件系统路径，使用 `tmp_path` 做真实文件 I/O；测试中不调用 LLM
 - 配置 JSON 使用 camelCase；Python 代码使用 snake_case — Pydantic 通过 `alias_generator` 处理转换
 - 工具通过 `to_schema()` 暴露 OpenAI function-calling 格式
-- 所有工具 `execute()` 方法是 async 的，返回字符串；错误作为字符串返回，不抛异常
+- 所有工具 `execute()` 方法是 async 的，返回 `str | list`（`ReadFileTool` 对图片返回多模态 content list）；错误作为字符串返回，不抛异常
 - 工具 `execute()` 签名使用 `**kwargs` 吸收 LLM 的意外参数
 - 斜杠命令（`/new`, `/help`）在 `_process_message()` 中拦截，不经过 LLM
+
+### 日志
+
+- 文件日志始终写入 `~/.nano-alice/logs/nano-alice.log`（10MB 轮转，保留 7 天，gzip 压缩），无需任何 flag
+- `--verbose`（gateway）/ `--logs`（agent）仅控制是否在控制台输出日志
