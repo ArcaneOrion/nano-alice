@@ -237,6 +237,15 @@ class ProvidersConfig(Base):
     github_copilot: ProviderConfig = Field(default_factory=ProviderConfig)  # Github Copilot (OAuth)
 
 
+class HeartbeatConfig(Base):
+    """Heartbeat service configuration."""
+
+    enabled: bool = True
+    interval_s: int = 30 * 60  # 30 minutes
+    notify_channel: str = ""  # Channel to send heartbeat results (e.g. "feishu")
+    notify_chat_id: str = ""  # Chat/user ID to notify (e.g. feishu open_id)
+
+
 class GatewayConfig(Base):
     """Gateway/server configuration."""
 
@@ -302,6 +311,7 @@ class Config(BaseSettings):
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
+    heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
 
     @property

@@ -441,31 +441,48 @@ def gateway(
         ))
     cron.on_job = on_cron_job
     
-    # Create heartbeat service
-    async def on_heartbeat(prompt: str) -> str:
-        """Execute heartbeat through the agent."""
-        return await agent.process_direct(prompt, session_key="heartbeat")
-    
-    heartbeat = HeartbeatService(
-        workspace=config.workspace_path,
-        on_heartbeat=on_heartbeat,
-        interval_s=30 * 60,  # 30 minutes
-        enabled=True
-    )
-    
-    # Create channel manager
+    # Create channel manager (before heartbeat so auto-detect can use enabled channels)
     channels = ChannelManager(config, bus)
-    
+
     if channels.enabled_channels:
         console.print(f"[green]✓[/green] Channels enabled: {', '.join(channels.enabled_channels)}")
     else:
         console.print("[yellow]Warning: No channels enabled[/yellow]")
-    
+
+    # Create heartbeat service
+    async def on_heartbeat(prompt: str, channel: str, chat_id: str) -> str:
+        """Execute heartbeat through the agent."""
+        return await agent.process_direct(
+            prompt, session_key="heartbeat",
+            channel=channel or "cli", chat_id=chat_id or "direct",
+        )
+
+    hb_cfg = config.heartbeat
+    # Auto-detect notify target from first enabled channel if not configured
+    notify_ch, notify_id = hb_cfg.notify_channel, hb_cfg.notify_chat_id
+    if not notify_ch:
+        for ch_name in channels.enabled_channels:
+            ch_config = getattr(config.channels, ch_name, None)
+            if ch_config and getattr(ch_config, "allow_from", None):
+                notify_ch = ch_name
+                notify_id = ch_config.allow_from[0]
+                break
+
+    heartbeat = HeartbeatService(
+        workspace=config.workspace_path,
+        on_heartbeat=on_heartbeat,
+        interval_s=hb_cfg.interval_s,
+        enabled=hb_cfg.enabled,
+        notify_channel=notify_ch,
+        notify_chat_id=notify_id,
+    )
+
     cron_status = cron.status()
     if cron_status["jobs"] > 0:
         console.print(f"[green]✓[/green] Cron: {cron_status['jobs']} scheduled jobs")
-    
-    console.print(f"[green]✓[/green] Heartbeat: every 30m")
+
+    hb_target = f" → {notify_ch}:{notify_id}" if notify_ch else " (no target channel)"
+    console.print(f"[green]✓[/green] Heartbeat: every {hb_cfg.interval_s // 60}m{hb_target}")
     
     async def run():
         try:

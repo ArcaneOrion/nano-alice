@@ -12,6 +12,7 @@ DEFAULT_HEARTBEAT_INTERVAL_S = 30 * 60
 # The prompt sent to agent during heartbeat
 HEARTBEAT_PROMPT = """Read HEARTBEAT.md in your workspace (if it exists).
 Follow any instructions or tasks listed there.
+If you have results to report, use the message tool to send them.
 If nothing needs attention, reply with just: HEARTBEAT_OK"""
 
 # Token that indicates "nothing to do"
@@ -38,22 +39,26 @@ def _is_heartbeat_empty(content: str | None) -> bool:
 class HeartbeatService:
     """
     Periodic heartbeat service that wakes the agent to check for tasks.
-    
+
     The agent reads HEARTBEAT.md from the workspace and executes any
     tasks listed there. If nothing needs attention, it replies HEARTBEAT_OK.
     """
-    
+
     def __init__(
         self,
         workspace: Path,
-        on_heartbeat: Callable[[str], Coroutine[Any, Any, str]] | None = None,
+        on_heartbeat: Callable[[str, str, str], Coroutine[Any, Any, str]] | None = None,
         interval_s: int = DEFAULT_HEARTBEAT_INTERVAL_S,
         enabled: bool = True,
+        notify_channel: str = "",
+        notify_chat_id: str = "",
     ):
         self.workspace = workspace
         self.on_heartbeat = on_heartbeat
         self.interval_s = interval_s
         self.enabled = enabled
+        self.notify_channel = notify_channel
+        self.notify_chat_id = notify_chat_id
         self._running = False
         self._task: asyncio.Task | None = None
     
@@ -112,19 +117,23 @@ class HeartbeatService:
         
         if self.on_heartbeat:
             try:
-                response = await self.on_heartbeat(HEARTBEAT_PROMPT)
-                
+                response = await self.on_heartbeat(
+                    HEARTBEAT_PROMPT, self.notify_channel, self.notify_chat_id
+                )
+
                 # Check if agent said "nothing to do"
                 if HEARTBEAT_OK_TOKEN.replace("_", "") in response.upper().replace("_", ""):
                     logger.info("Heartbeat: OK (no action needed)")
                 else:
                     logger.info("Heartbeat: completed task")
-                    
+
             except Exception as e:
                 logger.error("Heartbeat execution failed: {}", e)
-    
+
     async def trigger_now(self) -> str | None:
         """Manually trigger a heartbeat."""
         if self.on_heartbeat:
-            return await self.on_heartbeat(HEARTBEAT_PROMPT)
+            return await self.on_heartbeat(
+                HEARTBEAT_PROMPT, self.notify_channel, self.notify_chat_id
+            )
         return None
