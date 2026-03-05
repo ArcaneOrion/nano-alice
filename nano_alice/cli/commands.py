@@ -337,8 +337,13 @@ def _make_memory_provider(config: Config):
     return _make_provider(config, memory_cfg.model)
 
 
-def _setup_logging(enable_console: bool = False) -> None:
-    """配置 loguru 日志：文件持久化 + 可选控制台输出。"""
+def _setup_logging(enable_console: bool = False, console_level: str = "INFO") -> None:
+    """配置 loguru 日志：文件持久化 + 可选控制台输出。
+
+    Args:
+        enable_console: 是否开启控制台输出
+        console_level: 控制台日志级别，默认 INFO，gateway 模式下为 DEBUG
+    """
     from loguru import logger
     from nano_alice.config.loader import get_data_dir
 
@@ -360,10 +365,10 @@ def _setup_logging(enable_console: bool = False) -> None:
     )
 
     if enable_console:
-        # 控制台：只显示 INFO 及以上，精简格式
+        # 控制台：显示指定级别（gateway 用 DEBUG，cli 用 INFO）
         logger.add(
             lambda msg: print(msg, end=""),
-            level="INFO",
+            level=console_level,
             format="{time:HH:mm:ss} | {level:<5} | {message}",
             filter="nano_alice",
         )
@@ -389,7 +394,7 @@ def gateway(
     from nano_alice.cron.types import CronJob
     from nano_alice.heartbeat.service import HeartbeatService
     
-    _setup_logging(enable_console=verbose)
+    _setup_logging(enable_console=verbose, console_level="DEBUG" if verbose else "INFO")
 
     # 第三方库（litellm 等）使用 stdlib logging，verbose 时也开启
     if verbose:
@@ -551,7 +556,7 @@ def agent(
     # Memory subagent provider
     memory_provider = _make_memory_provider(config)
 
-    _setup_logging(enable_console=logs)
+    _setup_logging(enable_console=logs, console_level="INFO")
 
     agent_loop = AgentLoop(
         bus=bus,
