@@ -342,6 +342,9 @@ def _setup_logging(enable_console: bool = False) -> None:
     from loguru import logger
     from nano_alice.config.loader import get_data_dir
 
+    # 先确保模块启用（之前可能被 disable 过）
+    logger.enable("nano_alice")
+
     log_dir = get_data_dir() / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -357,9 +360,13 @@ def _setup_logging(enable_console: bool = False) -> None:
     )
 
     if enable_console:
-        logger.enable("nano_alice")
-    else:
-        logger.disable("nano_alice")
+        # 控制台：只显示 INFO 及以上，精简格式
+        logger.add(
+            lambda msg: print(msg, end=""),
+            level="INFO",
+            format="{time:HH:mm:ss} | {level:<5} | {message}",
+            filter="nano_alice",
+        )
 
 
 # ============================================================================
@@ -1023,7 +1030,7 @@ def cron_run(
     from nano_alice.cron.types import CronJob
     from nano_alice.bus.queue import MessageBus
     from nano_alice.agent.loop import AgentLoop
-    logger.disable("nano_alice")
+    _setup_logging(enable_console=False)
 
     config = load_config()
     provider = _make_provider(config)
