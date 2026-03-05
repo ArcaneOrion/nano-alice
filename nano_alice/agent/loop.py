@@ -514,6 +514,11 @@ class AgentLoop:
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
         logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)
 
+        # If message tool was used, record the actual sent content instead of LLM summary
+        if message_tool := self.tools.get("message"):
+            if isinstance(message_tool, MessageTool) and message_tool._sent_in_turn:
+                final_content = message_tool._last_sent_content or final_content
+
         session.add_message("user", msg.content,
                              media=msg.media if msg.media else None)
         session.add_message("assistant", final_content,
