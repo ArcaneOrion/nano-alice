@@ -424,10 +424,11 @@ class AgentLoop:
             key = f"{channel}:{chat_id}"
             session = self.sessions.get_or_create(key)
             self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
-            messages = self.context.build_messages(
+            envelope = self.context.build_prompt_envelope(
                 history=session.get_history(max_messages=self.memory_window),
                 current_message=msg.content, channel=channel, chat_id=chat_id,
             )
+            messages = self.context.render_messages(envelope)
             final_content, _, _ = await self._run_agent_loop(messages)
             session.add_message("user", f"[System: {msg.sender_id}] {msg.content}")
             session.add_message("assistant", final_content or "Background task completed.")
@@ -489,12 +490,22 @@ class AgentLoop:
             except Exception as e:
                 logger.warning("RAG recall failed: {}", e)
 
-        initial_messages = self.context.build_messages(
+        envelope = self.context.build_prompt_envelope(
             history=session.get_history(max_messages=self.memory_window),
             current_message=msg.content,
             media=msg.media if msg.media else None,
             channel=msg.channel, chat_id=msg.chat_id,
             recalled_context=recalled_context,
+        )
+        initial_messages = self.context.render_messages(envelope)
+        context_metrics = self.context.compute_context_metrics(envelope, initial_messages)
+        logger.debug(
+            "context built: system={} history={} current={} input={} history_messages={}",
+            context_metrics["system_chars"],
+            context_metrics["history_chars"],
+            context_metrics["current_context_chars"],
+            context_metrics["user_input_chars"],
+            context_metrics["history_message_count"],
         )
 
         async def _bus_progress(content: str) -> None:
@@ -540,6 +551,7 @@ class AgentLoop:
                 return None
 
         meta = dict(msg.metadata or {})
+        meta["context_size"] = context_metrics
         if token_usage and any(v > 0 for v in token_usage.values()):
             meta["token_usage"] = token_usage
         return OutboundMessage(

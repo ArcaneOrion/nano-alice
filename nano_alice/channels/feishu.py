@@ -630,17 +630,46 @@ class FeishuChannel(BaseChannel):
                 elements = self._build_card_elements(msg.content)
                 # 从 metadata 提取 token 用量，追加为卡片 note 脚注
                 token_usage = msg.metadata.get("token_usage") if msg.metadata else None
-                if token_usage and not msg.metadata.get("_progress"):
-                    total = token_usage.get("total_tokens", 0)
-                    if total > 0:
-                        prompt = token_usage.get("prompt_tokens", 0)
-                        compl = token_usage.get("completion_tokens", 0)
+                # 显示上下文大小和 token 消耗
+                context_size = msg.metadata.get("context_size") if msg.metadata else None
+                token_usage = msg.metadata.get("token_usage") if msg.metadata else None
+                
+                if context_size or token_usage:
+                    notes = []
+                    if context_size:
+                        if "system_chars" in context_size:
+                            system_len = context_size.get("system_chars", 0)
+                            history_len = context_size.get("history_chars", 0)
+                            current_len = context_size.get("current_context_chars", 0)
+                            input_len = context_size.get("user_input_chars", 0)
+                            notes.append(
+                                "Context: "
+                                f"system={system_len} chars, history={history_len} chars, "
+                                f"current={current_len} chars, input={input_len} chars"
+                            )
+                            history_count = context_size.get("history_message_count", 0)
+                            if history_count > 0:
+                                notes.append(f"History messages: {history_count}")
+                        else:
+                            system_len = context_size.get("system", 0)
+                            user_len = context_size.get("user", 0)
+                            if system_len > 0 or user_len > 0:
+                                notes.append(f"Context: system={system_len} chars, user={user_len} chars")
+                    
+                    if token_usage and not msg.metadata.get("_progress"):
+                        total = token_usage.get("total_tokens", 0)
+                        if total > 0:
+                            prompt = token_usage.get("prompt_tokens", 0)
+                            compl = token_usage.get("completion_tokens", 0)
+                            notes.append(f"Tokens: {prompt} + {compl} = {total}")
+                    
+                    if notes:
                         elements.append({"tag": "hr"})
-                        elements.append({
-                            "tag": "note",
-                            "elements": [{"tag": "plain_text",
-                                          "content": f"Tokens: {prompt} + {compl} = {total}"}],
-                        })
+                        for note in notes:
+                            elements.append({
+                                "tag": "note",
+                                "elements": [{"tag": "plain_text", "content": note}],
+                            })
                 card = {"config": {"wide_screen_mode": True}, "elements": elements}
                 await loop.run_in_executor(
                     None, self._send_message_sync,

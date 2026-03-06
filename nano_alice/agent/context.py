@@ -48,11 +48,6 @@ class ContextBuilder:
         # Memory context
         memory = self.memory.get_memory_context() or "(无)"
 
-        # Always-loaded skills: include full content in system prompt
-        always_skills = self.skills.get_always_skills()
-        always_content = ""
-        if always_skills:
-            always_content = self.skills.load_skills_for_context(always_skills) or ""
 
         result = f"""<system>
   <identity>
@@ -64,9 +59,7 @@ class ContextBuilder:
   <memory>
 {memory}
   </memory>
-  <skills>
-{always_content}
-  </skills>
+
 </system>"""
         logger.debug("system prompt: {} chars", len(result))
         return result
