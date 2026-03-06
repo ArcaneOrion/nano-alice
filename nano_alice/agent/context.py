@@ -31,52 +31,44 @@ class ContextBuilder:
                             recalled_context: str | None = None) -> str:
         """
         Build the system prompt from bootstrap files, memory, and skills.
-        
+
         Args:
             skill_names: Optional list of skills to include.
-        
+            recalled_context: Optional RAG-recalled memory context (moved to user message).
+
         Returns:
-            Complete system prompt.
+            Complete system prompt in XML format.
         """
-        parts = []
-        
         # Core identity
-        parts.append(self._get_identity())
-        
+        identity = self._get_identity()
+
         # Bootstrap files
         bootstrap = self._load_bootstrap_files()
-        if bootstrap:
-            parts.append(bootstrap)
-        
+
         # Memory context
-        memory = self.memory.get_memory_context()
-        if memory:
-            parts.append(f"# Memory\n\n{memory}")
+        memory = self.memory.get_memory_context() or "(无)"
 
-        # RAG: recalled context from semantic search
-        if recalled_context:
-            parts.append(f"# Recalled Context\n\n{recalled_context}")
-
-        # Skills - progressive loading
-        # 1. Always-loaded skills: include full content
+        # Always-loaded skills: include full content in system prompt
         always_skills = self.skills.get_always_skills()
+        always_content = ""
         if always_skills:
-            always_content = self.skills.load_skills_for_context(always_skills)
-            if always_content:
-                parts.append(f"# Active Skills\n\n{always_content}")
-        
-        # 2. Available skills: only show summary (agent uses read_file to load)
-        skills_summary = self.skills.build_skills_summary()
-        if skills_summary:
-            parts.append(f"""# Skills
+            always_content = self.skills.load_skills_for_context(always_skills) or ""
 
-The following skills extend your capabilities. To use a skill, read its SKILL.md file using the read_file tool.
-Skills with available="false" need dependencies installed first - you can try installing them with apt/brew.
-
-{skills_summary}""")
-        
-        result = "\n\n---\n\n".join(parts)
-        logger.debug("system prompt: {} parts, {} chars", len(parts), len(result))
+        result = f"""<system>
+  <identity>
+{identity}
+  </identity>
+  <bootstrap>
+{bootstrap}
+  </bootstrap>
+  <memory>
+{memory}
+  </memory>
+  <skills>
+{always_content}
+  </skills>
+</system>"""
+        logger.debug("system prompt: {} chars", len(result))
         return result
 
     def _get_identity(self) -> str:
@@ -150,14 +142,14 @@ To recall past events, grep {workspace_path}/memory/HISTORY.md"""
             media: Optional list of local file paths for images/media.
             channel: Current channel (telegram, feishu, etc.).
             chat_id: Current chat/user ID.
-            recalled_context: Optional RAG-recalled memory context.
+            recalled_context: Optional RAG-recalled memory context (injected into user message).
 
         Returns:
             List of messages including system prompt.
         """
         messages = []
 
-        # System prompt
+        # System prompt (now in XML format)
         system_prompt = self.build_system_prompt(skill_names, recalled_context=recalled_context)
         if channel and chat_id:
             system_prompt += f"\n\n## Current Session\nChannel: {channel}\nChat ID: {chat_id}"
@@ -170,10 +162,23 @@ To recall past events, grep {workspace_path}/memory/HISTORY.md"""
                 h.pop("media", None)
             messages.append(h)
 
-        # Current message (with optional image attachments)
+        # Build context XML for user message (RAG + Skills summary)
+        recalled = recalled_context or "(无)"
+        skills_summary = self.skills.build_skills_summary() or "(无)"
+
+        context_xml = f"""<context>
+  <memory>
+    <recalled>{recalled}</recalled>
+  </memory>
+  <skills>
+{skills_summary}
+  </skills>
+</context>"""
+
+        # Current message with context XML prepended
         from datetime import datetime as _dt
         ts = _dt.now().strftime("%Y-%m-%d %H:%M")
-        user_content = self._build_user_content(f"[{ts}] {current_message}", media)
+        user_content = self._build_user_content(f"{context_xml}\n\n[{ts}] {current_message}", media)
         messages.append({"role": "user", "content": user_content})
 
         logger.debug("build_messages: history={}, media={}", len(history), len(media) if media else 0)
