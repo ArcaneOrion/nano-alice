@@ -39,9 +39,13 @@ class ContextBuilder:
         self.memory = MemoryStore(workspace)
         self.skills = SkillsLoader(workspace)
 
-    def build_system_prompt(self) -> str:
+    def build_system_prompt(
+        self,
+        task_rules_xml: str | None = None,
+        task_state_xml: str | None = None,
+    ) -> str:
         """
-        Build the system prompt from bootstrap files and memory.
+        Build the system prompt from bootstrap files, memory, and task state.
 
         Returns:
             Complete system prompt in XML format.
@@ -49,6 +53,8 @@ class ContextBuilder:
         identity = self._get_identity()
         bootstrap = self._load_bootstrap_files()
         memory = self.memory.get_memory_context() or "(无)"
+        task_rules = task_rules_xml or ""
+        task_state = task_state_xml or ""
 
         result = f"""<system>
   <identity>
@@ -60,6 +66,10 @@ class ContextBuilder:
   <memory>
 {memory}
   </memory>
+  <task>
+{task_rules}
+{task_state}
+  </task>
 
 </system>"""
         logger.debug("system prompt: {} chars", len(result))
@@ -143,11 +153,16 @@ To recall past events, grep {workspace_path}/memory/HISTORY.md"""
         channel: str | None = None,
         chat_id: str | None = None,
         recalled_context: str | None = None,
+        task_rules_xml: str | None = None,
+        task_state_xml: str | None = None,
     ) -> BuiltContext:
         """Build structured prompt context before rendering messages."""
         del skill_names
 
-        system_prompt = self.build_system_prompt()
+        system_prompt = self.build_system_prompt(
+            task_rules_xml=task_rules_xml,
+            task_state_xml=task_state_xml,
+        )
         if channel and chat_id:
             system_prompt += f"\n\n## Current Session\nChannel: {channel}\nChat ID: {chat_id}"
 
@@ -187,6 +202,8 @@ To recall past events, grep {workspace_path}/memory/HISTORY.md"""
         channel: str | None = None,
         chat_id: str | None = None,
         recalled_context: str | None = None,
+        task_rules_xml: str | None = None,
+        task_state_xml: str | None = None,
     ) -> list[dict[str, Any]]:
         """Compatibility wrapper returning rendered provider messages."""
         envelope = self.build_prompt_envelope(
@@ -197,6 +214,8 @@ To recall past events, grep {workspace_path}/memory/HISTORY.md"""
             channel=channel,
             chat_id=chat_id,
             recalled_context=recalled_context,
+            task_rules_xml=task_rules_xml,
+            task_state_xml=task_state_xml,
         )
         messages = self.render_messages(envelope)
         logger.debug("build_messages: history={}, media={}", len(history), len(media) if media else 0)

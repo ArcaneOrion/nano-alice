@@ -15,6 +15,16 @@ from loguru import logger
 from nano_alice.agent.context import ContextBuilder
 from nano_alice.agent.memory import MemoryStore
 from nano_alice.agent.subagent import SubagentManager
+from nano_alice.agent.task_state import (
+    TaskRouteDecision,
+    TaskRouter,
+    TaskState,
+    TaskStateRenderer,
+    TaskStateStore,
+    build_steps,
+    extract_plan_from_text,
+    sync_task_pointers,
+)
 from nano_alice.agent.tools.cron import CronTool
 from nano_alice.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from nano_alice.agent.tools.message import MessageTool
@@ -98,6 +108,9 @@ class AgentLoop:
 
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
+        self.task_states = TaskStateStore(workspace)
+        self.task_router = TaskRouter()
+        self.task_renderer = TaskStateRenderer()
         self.tools = ToolRegistry()
         self.subagents = SubagentManager(
             provider=provider,
@@ -233,6 +246,110 @@ class AgentLoop:
             return f'{tc.name}("{val[:40]}…")' if len(val) > 40 else f'{tc.name}("{val}")'
         return ", ".join(_fmt(tc) for tc in tool_calls)
 
+    def _build_task_goal(self, msg: InboundMessage, active_task: TaskState | None) -> str:
+        if active_task and active_task.goal:
+            return msg.content.strip() or active_task.goal
+        return msg.content.strip()
+
+    async def _plan_task(self, session: Session, msg: InboundMessage, task_state: TaskState) -> TaskState:
+        planner_prompt = (
+            "你处于任务规划阶段。请只输出 JSON，不要输出额外解释。\n"
+            "输出格式: {\"summary\": \"...\", \"strategy\": \"...\", \"steps\": [\"步骤1\", \"步骤2\"]}\n"
+            "要求:\n"
+            "1. steps 必须是 3-7 个线性步骤\n"
+            "2. 每个步骤必须可执行、不可跳步\n"
+            "3. 不要声称已经完成任务\n"
+            f"任务目标: {task_state.goal}"
+        )
+        planning_messages = [
+            {
+                "role": "system",
+                "content": (
+                    self.task_renderer.render_task_rules_xml()
+                    + "\n<planning_mode>你现在只能规划，不能执行。</planning_mode>"
+                ),
+            },
+            *session.get_history(max_messages=min(self.memory_window, 12)),
+            {"role": "user", "content": planner_prompt},
+        ]
+        response = await self._chat_with_retry(planning_messages, tools=None)
+        plan_lines = extract_plan_from_text(response.content or "")
+        if not plan_lines:
+            plan_lines = ["分析当前请求与约束", "设计执行方案", "执行当前第一步"]
+        task_state.steps = build_steps(plan_lines[:7])
+        task_state.summary = (response.content or task_state.goal).strip()[:200]
+        if response.content:
+            try:
+                parsed = json.loads(re.search(r"\{[\s\S]*\}", response.content).group(0))
+                if isinstance(parsed, dict):
+                    task_state.summary = str(parsed.get("summary") or task_state.summary)[:200]
+                    task_state.strategy = str(parsed.get("strategy") or task_state.strategy)[:200]
+            except Exception:
+                pass
+        task_state.phase = "executing"
+        sync_task_pointers(task_state)
+        self.task_states.save_active(task_state)
+        return task_state
+
+    def _maybe_start_task(
+        self,
+        session_key: str,
+        msg: InboundMessage,
+        active_task: TaskState | None,
+        route: TaskRouteDecision,
+    ) -> TaskState | None:
+        if route.mode != "task":
+            return None
+        if active_task is None:
+            task_state = self.task_states.create_new_task(
+                session_key=session_key,
+                goal=self._build_task_goal(msg, active_task),
+                summary=msg.content,
+            )
+            self.task_states.save_active(task_state)
+            return task_state
+        if route.needs_replan:
+            active_task.goal = msg.content.strip() or active_task.goal
+            active_task.phase = "replanning"
+            active_task.plan_version += 1
+            active_task.last_action = "user requested replanning"
+            self.task_states.save_active(active_task)
+        return active_task
+
+    def _complete_current_step(
+        self,
+        task_state: TaskState | None,
+        final_content: str | None,
+        tool_evidence: list[str],
+    ) -> TaskState | None:
+        if task_state is None or task_state.phase != "executing":
+            return task_state
+        current = next((step for step in task_state.steps if step.index == task_state.current_step_index), None)
+        if current is None:
+            return task_state
+        result_text = (final_content or "").strip()
+        if not result_text and not tool_evidence:
+            return task_state
+        current.result = result_text[:500]
+        current.evidence.extend(tool_evidence)
+        current.status = "done"
+        task_state.last_action = f"completed step {current.index}: {current.title}"
+        next_step = next((step for step in task_state.steps if step.index == current.index + 1), None)
+        if next_step is None:
+            task_state.phase = "completed"
+            task_state.status = "done"
+            task_state.current_step_index = current.index
+            task_state.current_step_id = current.id
+            task_state.next_step_id = ""
+            self.task_states.save_active(task_state)
+            self.task_states.archive_active(task_state.session_key)
+            return None
+        next_step.status = "in_progress"
+        task_state.phase = "executing"
+        sync_task_pointers(task_state)
+        self.task_states.save_active(task_state)
+        return task_state
+
     async def _chat_with_retry(
         self,
         messages: list[dict],
@@ -289,12 +406,13 @@ class AgentLoop:
         self,
         initial_messages: list[dict],
         on_progress: Callable[[str], Awaitable[None]] | None = None,
-    ) -> tuple[str | None, list[str], dict[str, int]]:
-        """Run the agent iteration loop. Returns (final_content, tools_used, token_usage)."""
+    ) -> tuple[str | None, list[str], dict[str, int], list[str]]:
+        """Run the agent iteration loop. Returns (final_content, tools_used, token_usage, evidence)."""
         messages = initial_messages
         iteration = 0
         final_content = None
         tools_used: list[str] = []
+        evidence: list[str] = []
         total_usage: dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         loop_t0 = time.perf_counter()
 
@@ -336,6 +454,9 @@ class AgentLoop:
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.info("Tool call: {}({})", tool_call.name, args_str[:200])
                     result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                    result_preview = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
+                    evidence.append(f"tool:{tool_call.name}")
+                    evidence.append(f"result:{result_preview[:120]}")
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
                     )
@@ -351,7 +472,7 @@ class AgentLoop:
             iteration, loop_elapsed,
             total_usage["prompt_tokens"], total_usage["completion_tokens"], total_usage["total_tokens"],
         )
-        return final_content, tools_used, total_usage
+        return final_content, tools_used, total_usage, evidence
 
     async def run(self) -> None:
         """Run the agent loop, processing messages from the bus."""
@@ -427,9 +548,10 @@ class AgentLoop:
             envelope = self.context.build_prompt_envelope(
                 history=session.get_history(max_messages=self.memory_window),
                 current_message=msg.content, channel=channel, chat_id=chat_id,
+                task_rules_xml=self.task_renderer.render_task_rules_xml(),
             )
             messages = self.context.render_messages(envelope)
-            final_content, _, _ = await self._run_agent_loop(messages)
+            final_content, _, _, _ = await self._run_agent_loop(messages)
             session.add_message("user", f"[System: {msg.sender_id}] {msg.content}")
             session.add_message("assistant", final_content or "Background task completed.")
             self.sessions.save(session)
@@ -449,6 +571,7 @@ class AgentLoop:
             session.clear()
             self.sessions.save(session)
             self.sessions.invalidate(session.key)
+            self.task_states.archive_active(session.key)
 
             async def _consolidate_and_cleanup():
                 temp = Session(key=session.key)
@@ -478,6 +601,15 @@ class AgentLoop:
             if isinstance(message_tool, MessageTool):
                 message_tool.start_turn()
 
+        active_task = self.task_states.load_active(session.key)
+        route = self.task_router.decide(msg.content, active_task=active_task)
+        task_state = self._maybe_start_task(session.key, msg, active_task, route)
+        if task_state and task_state.phase in {"planning", "replanning"}:
+            task_state = await self._plan_task(session, msg, task_state)
+
+        task_rules_xml = self.task_renderer.render_task_rules_xml()
+        task_state_xml = self.task_renderer.render_task_state_xml(task_state)
+
         # RAG: semantic search for relevant memory
         recalled_context = None
         if self._memory_index:
@@ -496,6 +628,8 @@ class AgentLoop:
             media=msg.media if msg.media else None,
             channel=msg.channel, chat_id=msg.chat_id,
             recalled_context=recalled_context,
+            task_rules_xml=task_rules_xml,
+            task_state_xml=task_state_xml,
         )
         initial_messages = self.context.render_messages(envelope)
         context_metrics = self.context.compute_context_metrics(envelope, initial_messages)
@@ -515,7 +649,7 @@ class AgentLoop:
                 channel=msg.channel, chat_id=msg.chat_id, content=content, metadata=meta,
             ))
 
-        final_content, tools_used, token_usage = await self._run_agent_loop(
+        final_content, tools_used, token_usage, task_evidence = await self._run_agent_loop(
             initial_messages, on_progress=on_progress or _bus_progress,
         )
 
@@ -529,6 +663,8 @@ class AgentLoop:
         if message_tool := self.tools.get("message"):
             if isinstance(message_tool, MessageTool) and message_tool._sent_in_turn:
                 final_content = message_tool._last_sent_content or final_content
+
+        task_state = self._complete_current_step(task_state, final_content, task_evidence)
 
         session.add_message("user", msg.content,
                              media=msg.media if msg.media else None)
@@ -552,6 +688,11 @@ class AgentLoop:
 
         meta = dict(msg.metadata or {})
         meta["context_size"] = context_metrics
+        meta["mode"] = route.mode
+        if task_state:
+            meta["task_phase"] = task_state.phase
+            meta["task_current_step_index"] = task_state.current_step_index
+            meta["task_current_step_id"] = task_state.current_step_id
         if token_usage and any(v > 0 for v in token_usage.values()):
             meta["token_usage"] = token_usage
         return OutboundMessage(
