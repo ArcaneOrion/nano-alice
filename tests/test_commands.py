@@ -8,6 +8,7 @@ from typer.testing import CliRunner
 from nano_alice.cli.commands import app, _make_provider
 from nano_alice.config.schema import Config
 from nano_alice.providers.litellm_provider import LiteLLMProvider
+from nano_alice.providers.custom_provider import CustomProvider
 from nano_alice.providers.openai_codex_provider import OpenAICodexProvider, _strip_model_prefix
 from nano_alice.providers.registry import find_by_model
 
@@ -142,5 +143,45 @@ def test_make_provider_uses_responses_provider_for_openai_codex_when_api_key_con
 
     assert isinstance(provider, OpenAICodexProvider)
     assert provider.default_model == "openaiCodex/gpt-5.4"
+    assert provider.api_key == "sk-test"
+    assert provider.api_base == "https://example.com/v1"
+
+
+def test_make_provider_uses_custom_provider_for_openai_with_custom_api_base():
+    config = Config()
+    config.agents.defaults.model = "openai/gpt-5.4"
+    config.providers.openai.api_key = "sk-test"
+    config.providers.openai.api_base = "https://example.com/v1"
+
+    provider = _make_provider(config)
+
+    assert isinstance(provider, CustomProvider)
+    assert provider.default_model == "gpt-5.4"
+    assert provider.api_key == "sk-test"
+    assert provider.api_base == "https://example.com/v1"
+
+
+def test_explicit_provider_name_overrides_model_keyword_matching():
+    config = Config()
+    config.agents.defaults.provider = "openai"
+    config.agents.defaults.model = "gpt-5.1-codex"
+    config.providers.openai.api_key = "sk-openai"
+    config.providers.openai_codex.api_key = "sk-codex"
+    config.providers.openai_codex.api_base = "https://example.com/v1"
+
+    assert config.get_provider_name() == "openai"
+
+
+def test_make_provider_uses_explicit_openai_codex_route():
+    config = Config()
+    config.agents.defaults.provider = "openaiCodex"
+    config.agents.defaults.model = "gpt-5.4"
+    config.providers.openai_codex.api_key = "sk-test"
+    config.providers.openai_codex.api_base = "https://example.com/v1"
+
+    provider = _make_provider(config)
+
+    assert isinstance(provider, OpenAICodexProvider)
+    assert provider.default_model == "gpt-5.4"
     assert provider.api_key == "sk-test"
     assert provider.api_base == "https://example.com/v1"

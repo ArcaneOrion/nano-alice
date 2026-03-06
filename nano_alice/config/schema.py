@@ -183,6 +183,7 @@ class AgentDefaults(Base):
     """Default agent configuration."""
 
     workspace: str = "~/.nano-alice/workspace"
+    provider: str = ""  # empty = auto-match from model
     model: str = "anthropic/claude-opus-4-5"
     max_tokens: int = 8192
     temperature: float = 0.7
@@ -194,6 +195,7 @@ class MemoryAgentConfig(Base):
     """Memory subagent configuration."""
 
     enabled: bool = True
+    provider: str = ""  # empty = auto-match from model
     model: str = ""  # empty = use main agent model
     api_key: str = ""  # empty = auto-match from providers
     api_base: str = ""  # empty = auto-match from providers
@@ -319,9 +321,24 @@ class Config(BaseSettings):
         """Get expanded workspace path."""
         return Path(self.agents.defaults.workspace).expanduser()
 
-    def _match_provider(self, model: str | None = None) -> tuple["ProviderConfig | None", str | None]:
+    def _match_provider(
+        self,
+        model: str | None = None,
+        provider_name: str | None = None,
+    ) -> tuple["ProviderConfig | None", str | None]:
         """Match provider config and its registry name. Returns (config, spec_name)."""
         from nano_alice.providers.registry import PROVIDERS
+
+        if provider_name:
+            normalized = provider_name.lower().replace("-", "_")
+            normalized_compact = normalized.replace("_", "")
+            for spec in PROVIDERS:
+                if spec.name != normalized and spec.name.replace("_", "") != normalized_compact:
+                    continue
+                p = getattr(self.providers, spec.name, None)
+                if p and (spec.is_oauth or p.api_key or p.api_base):
+                    return p, spec.name
+                return p, spec.name
 
         model_lower = (model or self.agents.defaults.model).lower()
         model_normalized = model_lower.replace("-", "_")
@@ -356,26 +373,30 @@ class Config(BaseSettings):
                 return p, spec.name
         return None, None
 
-    def get_provider(self, model: str | None = None) -> ProviderConfig | None:
+    def get_provider(
+        self,
+        model: str | None = None,
+        provider_name: str | None = None,
+    ) -> ProviderConfig | None:
         """Get matched provider config (api_key, api_base, extra_headers). Falls back to first available."""
-        p, _ = self._match_provider(model)
+        p, _ = self._match_provider(model, provider_name)
         return p
 
-    def get_provider_name(self, model: str | None = None) -> str | None:
+    def get_provider_name(self, model: str | None = None, provider_name: str | None = None) -> str | None:
         """Get the registry name of the matched provider (e.g. "deepseek", "openrouter")."""
-        _, name = self._match_provider(model)
+        _, name = self._match_provider(model, provider_name)
         return name
 
-    def get_api_key(self, model: str | None = None) -> str | None:
+    def get_api_key(self, model: str | None = None, provider_name: str | None = None) -> str | None:
         """Get API key for the given model. Falls back to first available key."""
-        p = self.get_provider(model)
+        p = self.get_provider(model, provider_name)
         return p.api_key if p else None
 
-    def get_api_base(self, model: str | None = None) -> str | None:
+    def get_api_base(self, model: str | None = None, provider_name: str | None = None) -> str | None:
         """Get API base URL for the given model. Applies default URLs for known gateways."""
         from nano_alice.providers.registry import find_by_name
 
-        p, name = self._match_provider(model)
+        p, name = self._match_provider(model, provider_name)
         if p and p.api_base:
             return p.api_base
         # Only gateways get a default api_base here. Standard providers

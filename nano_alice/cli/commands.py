@@ -294,15 +294,21 @@ This file stores important information that should persist across sessions.
     skills_dir.mkdir(exist_ok=True)
 
 
-def _make_provider(config: Config, model: str | None = None):
+def _make_provider(
+    config: Config,
+    model: str | None = None,
+    provider_name: str | None = None,
+):
     """Create the appropriate LLM provider from config."""
     from nano_alice.providers.litellm_provider import LiteLLMProvider
-    from nano_alice.providers.openai_codex_provider import OpenAICodexProvider, _strip_model_prefix
+    from nano_alice.providers.openai_codex_provider import OpenAICodexProvider
     from nano_alice.providers.custom_provider import CustomProvider
 
+    using_default_model = model is None
     model = model or config.agents.defaults.model
-    provider_name = config.get_provider_name(model)
-    p = config.get_provider(model)
+    provider_name = provider_name or (config.agents.defaults.provider if using_default_model else None)
+    provider_name = config.get_provider_name(model, provider_name)
+    p = config.get_provider(model, provider_name)
 
     # OpenAI Codex: use Responses API for both OAuth and API-key gateway modes.
     if provider_name == "openai_codex":
@@ -310,16 +316,27 @@ def _make_provider(config: Config, model: str | None = None):
             return OpenAICodexProvider(
                 default_model=model,
                 api_key=p.api_key if p else None,
-                api_base=config.get_api_base(model),
+                api_base=config.get_api_base(model, provider_name),
                 extra_headers=p.extra_headers if p else None,
             )
         return OpenAICodexProvider(default_model=model)
+
+    # OpenAI-compatible proxies often implement only `/chat/completions`.
+    # Route explicit custom bases through the direct OpenAI-compatible client
+    # to avoid LiteLLM selecting Responses-format handling for GPT-5 models.
+    if provider_name == "openai" and p and p.api_base:
+        custom_model = model.split("/", 1)[1] if model.lower().startswith("openai/") else model
+        return CustomProvider(
+            api_key=p.api_key if p else "no-key",
+            api_base=config.get_api_base(model, provider_name) or "https://api.openai.com/v1",
+            default_model=custom_model,
+        )
 
     # Custom: direct OpenAI-compatible endpoint, bypasses LiteLLM
     if provider_name == "custom":
         return CustomProvider(
             api_key=p.api_key if p else "no-key",
-            api_base=config.get_api_base(model) or "http://localhost:8000/v1",
+            api_base=config.get_api_base(model, provider_name) or "http://localhost:8000/v1",
             default_model=model,
         )
 
@@ -332,7 +349,7 @@ def _make_provider(config: Config, model: str | None = None):
 
     return LiteLLMProvider(
         api_key=p.api_key if p else None,
-        api_base=config.get_api_base(model),
+        api_base=config.get_api_base(model, provider_name),
         default_model=model,
         extra_headers=p.extra_headers if p else None,
         provider_name=provider_name,
@@ -356,7 +373,7 @@ def _make_memory_provider(config: Config):
         )
 
     # Model set but no explicit credentials → auto-match from providers
-    return _make_provider(config, memory_cfg.model)
+    return _make_provider(config, memory_cfg.model, memory_cfg.provider or None)
 
 
 def _setup_logging(enable_console: bool = False, console_level: str = "INFO") -> None:
