@@ -3,6 +3,7 @@
 import base64
 import mimetypes
 import platform
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -12,42 +13,42 @@ from nano_alice.agent.memory import MemoryStore
 from nano_alice.agent.skills import SkillsLoader
 
 
+@dataclass
+class BuiltContext:
+    """Structured prompt state before rendering to provider messages."""
+
+    system_prompt: str
+    history_messages: list[dict[str, Any]]
+    current_context_text: str
+    current_user_input: str
+    current_user_media: list[str] | None = None
+
+
 class ContextBuilder:
     """
     Builds the context (system prompt + messages) for the agent.
-    
+
     Assembles bootstrap files, memory, skills, and conversation history
     into a coherent prompt for the LLM.
     """
-    
+
     BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md", "IDENTITY.md"]
-    
+
     def __init__(self, workspace: Path):
         self.workspace = workspace
         self.memory = MemoryStore(workspace)
         self.skills = SkillsLoader(workspace)
-    
-    def build_system_prompt(self, skill_names: list[str] | None = None,
-                            recalled_context: str | None = None) -> str:
-        """
-        Build the system prompt from bootstrap files, memory, and skills.
 
-        Args:
-            skill_names: Optional list of skills to include.
-            recalled_context: Optional RAG-recalled memory context (moved to user message).
+    def build_system_prompt(self) -> str:
+        """
+        Build the system prompt from bootstrap files and memory.
 
         Returns:
             Complete system prompt in XML format.
         """
-        # Core identity
         identity = self._get_identity()
-
-        # Bootstrap files
         bootstrap = self._load_bootstrap_files()
-
-        # Memory context
         memory = self.memory.get_memory_context() or "(无)"
-
 
         result = f"""<system>
   <identity>
@@ -68,15 +69,19 @@ class ContextBuilder:
         """Get the core identity section."""
         from datetime import datetime
         import time as _time
+
         now = datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
         tz = _time.strftime("%Z") or "UTC"
         workspace_path = str(self.workspace.expanduser().resolve())
         system = platform.system()
-        runtime = f"{'macOS' if system == 'Darwin' else system} {platform.machine()}, Python {platform.python_version()}"
-        
+        runtime = (
+            f"{'macOS' if system == 'Darwin' else system} "
+            f"{platform.machine()}, Python {platform.python_version()}"
+        )
+
         return f"""# nano-alice 🐈
 
-You are nano-alice, a helpful AI assistant. 
+You are nano-alice, a helpful AI assistant.
 
 ## Current Time
 {now} ({tz})
@@ -99,7 +104,7 @@ Always be helpful, accurate, and concise. Before calling tools, briefly tell the
 If you need to use tools, call them directly — never send a preliminary message like "Let me check" without actually calling a tool.
 When remembering something important, write to {workspace_path}/memory/MEMORY.md
 To recall past events, grep {workspace_path}/memory/HISTORY.md"""
-    
+
     def _load_bootstrap_files(self) -> str:
         """Load all bootstrap files from workspace."""
         parts = []
@@ -114,7 +119,65 @@ To recall past events, grep {workspace_path}/memory/HISTORY.md"""
 
         logger.debug("bootstrap files loaded: {}", loaded)
         return "\n\n".join(parts) if parts else ""
-    
+
+    def build_current_context_text(self, recalled_context: str | None = None) -> str:
+        """Build the current-turn context block injected alongside user input."""
+        recalled = recalled_context or "(无)"
+        skills_summary = self.skills.build_skills_summary() or "(无)"
+        logger.debug("skills summary: {} chars", len(skills_summary))
+        return f"""<context>
+  <memory>
+    <recalled>{recalled}</recalled>
+  </memory>
+  <skills>
+{skills_summary}
+  </skills>
+</context>"""
+
+    def build_prompt_envelope(
+        self,
+        history: list[dict[str, Any]],
+        current_message: str,
+        skill_names: list[str] | None = None,
+        media: list[str] | None = None,
+        channel: str | None = None,
+        chat_id: str | None = None,
+        recalled_context: str | None = None,
+    ) -> BuiltContext:
+        """Build structured prompt context before rendering messages."""
+        del skill_names
+
+        system_prompt = self.build_system_prompt()
+        if channel and chat_id:
+            system_prompt += f"\n\n## Current Session\nChannel: {channel}\nChat ID: {chat_id}"
+
+        logger.debug("build_prompt_envelope: history={}, media={}", len(history), len(media) if media else 0)
+        return BuiltContext(
+            system_prompt=system_prompt,
+            history_messages=self._prepare_history(history),
+            current_context_text=self.build_current_context_text(recalled_context=recalled_context),
+            current_user_input=current_message,
+            current_user_media=media,
+        )
+
+    def render_messages(self, envelope: BuiltContext) -> list[dict[str, Any]]:
+        """Render the structured prompt envelope to provider-compatible messages."""
+        messages = [{"role": "system", "content": envelope.system_prompt}]
+        messages.extend(envelope.history_messages)
+
+        from datetime import datetime as _dt
+
+        ts = _dt.now().strftime("%Y-%m-%d %H:%M")
+        current_text = (
+            f"{envelope.current_context_text}\n\n"
+            f"<user_input>\n[{ts}] {envelope.current_user_input}\n</user_input>"
+        )
+        messages.append({
+            "role": "user",
+            "content": self._build_user_content(current_text, envelope.current_user_media),
+        })
+        return messages
+
     def build_messages(
         self,
         history: list[dict[str, Any]],
@@ -125,63 +188,62 @@ To recall past events, grep {workspace_path}/memory/HISTORY.md"""
         chat_id: str | None = None,
         recalled_context: str | None = None,
     ) -> list[dict[str, Any]]:
-        """
-        Build the complete message list for an LLM call.
-
-        Args:
-            history: Previous conversation messages.
-            current_message: The new user message.
-            skill_names: Optional skills to include.
-            media: Optional list of local file paths for images/media.
-            channel: Current channel (telegram, feishu, etc.).
-            chat_id: Current chat/user ID.
-            recalled_context: Optional RAG-recalled memory context (injected into user message).
-
-        Returns:
-            List of messages including system prompt.
-        """
-        messages = []
-
-        # System prompt (now in XML format)
-        system_prompt = self.build_system_prompt(skill_names, recalled_context=recalled_context)
-        if channel and chat_id:
-            system_prompt += f"\n\n## Current Session\nChannel: {channel}\nChat ID: {chat_id}"
-        messages.append({"role": "system", "content": system_prompt})
-
-        # History (re-encode images for user messages that have media paths)
-        for h in history:
-            if h["role"] == "user" and h.get("media"):
-                h = {**h, "content": self._build_user_content(h["content"], h["media"])}
-                h.pop("media", None)
-            messages.append(h)
-
-        # Build context XML for user message (RAG + Skills summary)
-        recalled = recalled_context or "(无)"
-        skills_summary = self.skills.build_skills_summary() or "(无)"
-
-        context_xml = f"""<context>
-  <memory>
-    <recalled>{recalled}</recalled>
-  </memory>
-  <skills>
-{skills_summary}
-  </skills>
-</context>"""
-
-        # Current message with context XML prepended
-        from datetime import datetime as _dt
-        ts = _dt.now().strftime("%Y-%m-%d %H:%M")
-        user_content = self._build_user_content(f"{context_xml}\n\n[{ts}] {current_message}", media)
-        messages.append({"role": "user", "content": user_content})
-
+        """Compatibility wrapper returning rendered provider messages."""
+        envelope = self.build_prompt_envelope(
+            history=history,
+            current_message=current_message,
+            skill_names=skill_names,
+            media=media,
+            channel=channel,
+            chat_id=chat_id,
+            recalled_context=recalled_context,
+        )
+        messages = self.render_messages(envelope)
         logger.debug("build_messages: history={}, media={}", len(history), len(media) if media else 0)
         return messages
+
+    def compute_context_metrics(self, envelope: BuiltContext, messages: list[dict[str, Any]]) -> dict[str, int]:
+        """Compute context metrics matching the structured prompt layout."""
+        history_chars = sum(self._content_text_length(m.get("content")) for m in envelope.history_messages)
+        total_chars = sum(self._content_text_length(m.get("content")) for m in messages)
+        return {
+            "system_chars": len(envelope.system_prompt),
+            "history_chars": history_chars,
+            "current_context_chars": len(envelope.current_context_text),
+            "user_input_chars": len(envelope.current_user_input),
+            "total_rendered_input_chars": total_chars,
+            "history_message_count": len(envelope.history_messages),
+        }
+
+    def _prepare_history(self, history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Normalize history for provider consumption without changing session records."""
+        prepared = []
+        for msg in history:
+            if msg["role"] == "user" and msg.get("media"):
+                msg = {**msg, "content": self._build_user_content(msg["content"], msg["media"])}
+                msg.pop("media", None)
+            prepared.append(msg)
+        return prepared
+
+    def _content_text_length(self, content: Any) -> int:
+        """Approximate textual payload size without counting binary/image blocks."""
+        if content is None:
+            return 0
+        if isinstance(content, str):
+            return len(content)
+        if isinstance(content, list):
+            return sum(self._content_text_length(item) for item in content)
+        if isinstance(content, dict):
+            if content.get("type") in {"text", "input_text", "output_text"}:
+                return len(str(content.get("text", "")))
+            return 0
+        return len(str(content))
 
     def _build_user_content(self, text: str, media: list[str] | None) -> str | list[dict[str, Any]]:
         """Build user message content with optional base64-encoded images."""
         if not media:
             return text
-        
+
         images = []
         for path in media:
             p = Path(path)
@@ -190,38 +252,27 @@ To recall past events, grep {workspace_path}/memory/HISTORY.md"""
                 continue
             b64 = base64.b64encode(p.read_bytes()).decode()
             images.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
-        
+
         if not images:
             return text
         return images + [{"type": "text", "text": text}]
-    
+
     def add_tool_result(
         self,
         messages: list[dict[str, Any]],
         tool_call_id: str,
         tool_name: str,
-        result: str | list
+        result: str | list,
     ) -> list[dict[str, Any]]:
-        """
-        Add a tool result to the message list.
-        
-        Args:
-            messages: Current message list.
-            tool_call_id: ID of the tool call.
-            tool_name: Name of the tool.
-            result: Tool execution result.
-        
-        Returns:
-            Updated message list.
-        """
+        """Add a tool result to the message list."""
         messages.append({
             "role": "tool",
             "tool_call_id": tool_call_id,
             "name": tool_name,
-            "content": result
+            "content": result,
         })
         return messages
-    
+
     def add_assistant_message(
         self,
         messages: list[dict[str, Any]],
@@ -229,28 +280,12 @@ To recall past events, grep {workspace_path}/memory/HISTORY.md"""
         tool_calls: list[dict[str, Any]] | None = None,
         reasoning_content: str | None = None,
     ) -> list[dict[str, Any]]:
-        """
-        Add an assistant message to the message list.
-        
-        Args:
-            messages: Current message list.
-            content: Message content.
-            tool_calls: Optional tool calls.
-            reasoning_content: Thinking output (Kimi, DeepSeek-R1, etc.).
-        
-        Returns:
-            Updated message list.
-        """
+        """Add an assistant message to the message list."""
         msg: dict[str, Any] = {"role": "assistant"}
-
-        # Always include content — some providers (e.g. StepFun) reject
-        # assistant messages that omit the key entirely.
         msg["content"] = content
 
         if tool_calls:
             msg["tool_calls"] = tool_calls
-
-        # Include reasoning content when provided (required by some thinking models)
         if reasoning_content is not None:
             msg["reasoning_content"] = reasoning_content
 
