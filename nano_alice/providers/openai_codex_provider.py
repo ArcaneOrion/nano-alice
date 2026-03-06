@@ -80,8 +80,13 @@ class OpenAICodexProvider(LLMProvider):
 
 
 def _strip_model_prefix(model: str) -> str:
-    if model.startswith("openai-codex/") or model.startswith("openai_codex/"):
-        return model.split("/", 1)[1]
+    if "/" not in model:
+        return model
+
+    prefix, remainder = model.split("/", 1)
+    normalized_prefix = prefix.lower().replace("-", "_")
+    if normalized_prefix in {"openai_codex", "openaicodex"}:
+        return remainder
     return model
 
 

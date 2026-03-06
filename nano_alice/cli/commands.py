@@ -282,15 +282,22 @@ This file stores important information that should persist across sessions.
 def _make_provider(config: Config, model: str | None = None):
     """Create the appropriate LLM provider from config."""
     from nano_alice.providers.litellm_provider import LiteLLMProvider
-    from nano_alice.providers.openai_codex_provider import OpenAICodexProvider
+    from nano_alice.providers.openai_codex_provider import OpenAICodexProvider, _strip_model_prefix
     from nano_alice.providers.custom_provider import CustomProvider
 
     model = model or config.agents.defaults.model
     provider_name = config.get_provider_name(model)
     p = config.get_provider(model)
 
-    # OpenAI Codex (OAuth)
-    if provider_name == "openai_codex" or model.startswith("openai-codex/"):
+    # OpenAI Codex: use API key via CustomProvider when credentials are configured;
+    # otherwise fall back to the OAuth-based Codex provider.
+    if provider_name == "openai_codex":
+        if p and (p.api_key or p.api_base):
+            return CustomProvider(
+                api_key=p.api_key if p else "no-key",
+                api_base=config.get_api_base(model) or "http://localhost:8000/v1",
+                default_model=_strip_model_prefix(model),
+            )
         return OpenAICodexProvider(default_model=model)
 
     # Custom: direct OpenAI-compatible endpoint, bypasses LiteLLM

@@ -5,8 +5,9 @@ from unittest.mock import patch
 import pytest
 from typer.testing import CliRunner
 
-from nano_alice.cli.commands import app
+from nano_alice.cli.commands import app, _make_provider
 from nano_alice.config.schema import Config
+from nano_alice.providers.custom_provider import CustomProvider
 from nano_alice.providers.litellm_provider import LiteLLMProvider
 from nano_alice.providers.openai_codex_provider import _strip_model_prefix
 from nano_alice.providers.registry import find_by_model
@@ -128,3 +129,18 @@ def test_litellm_provider_canonicalizes_github_copilot_hyphen_prefix():
 def test_openai_codex_strip_prefix_supports_hyphen_and_underscore():
     assert _strip_model_prefix("openai-codex/gpt-5.1-codex") == "gpt-5.1-codex"
     assert _strip_model_prefix("openai_codex/gpt-5.1-codex") == "gpt-5.1-codex"
+    assert _strip_model_prefix("openaiCodex/gpt-5.4") == "gpt-5.4"
+
+
+def test_make_provider_uses_custom_for_openai_codex_when_api_key_configured():
+    config = Config()
+    config.agents.defaults.model = "openaiCodex/gpt-5.4"
+    config.providers.openai_codex.api_key = "sk-test"
+    config.providers.openai_codex.api_base = "https://example.com/v1"
+
+    provider = _make_provider(config)
+
+    assert isinstance(provider, CustomProvider)
+    assert provider.default_model == "gpt-5.4"
+    assert provider.api_key == "sk-test"
+    assert provider.api_base == "https://example.com/v1"
