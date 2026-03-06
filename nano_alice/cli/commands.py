@@ -304,14 +304,14 @@ def _make_provider(config: Config, model: str | None = None):
     provider_name = config.get_provider_name(model)
     p = config.get_provider(model)
 
-    # OpenAI Codex: use API key via CustomProvider when credentials are configured;
-    # otherwise fall back to the OAuth-based Codex provider.
+    # OpenAI Codex: use Responses API for both OAuth and API-key gateway modes.
     if provider_name == "openai_codex":
         if p and (p.api_key or p.api_base):
-            return CustomProvider(
-                api_key=p.api_key if p else "no-key",
-                api_base=config.get_api_base(model) or "http://localhost:8000/v1",
-                default_model=_strip_model_prefix(model),
+            return OpenAICodexProvider(
+                default_model=model,
+                api_key=p.api_key if p else None,
+                api_base=config.get_api_base(model),
+                extra_headers=p.extra_headers if p else None,
             )
         return OpenAICodexProvider(default_model=model)
 

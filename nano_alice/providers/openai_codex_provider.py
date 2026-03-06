@@ -18,11 +18,18 @@ DEFAULT_ORIGINATOR = "nano-alice"
 
 
 class OpenAICodexProvider(LLMProvider):
-    """Use Codex OAuth to call the Responses API."""
+    """Call the Responses API via OAuth or API-key-based compatible gateways."""
 
-    def __init__(self, default_model: str = "openai-codex/gpt-5.1-codex"):
-        super().__init__(api_key=None, api_base=None)
+    def __init__(
+        self,
+        default_model: str = "openai-codex/gpt-5.1-codex",
+        api_key: str | None = None,
+        api_base: str | None = None,
+        extra_headers: dict[str, str] | None = None,
+    ):
+        super().__init__(api_key=api_key, api_base=api_base)
         self.default_model = default_model
+        self.extra_headers = extra_headers or {}
 
     async def chat(
         self,
@@ -35,8 +42,13 @@ class OpenAICodexProvider(LLMProvider):
         model = model or self.default_model
         system_prompt, input_items = _convert_messages(messages)
 
-        token = await asyncio.to_thread(get_codex_token)
-        headers = _build_headers(token.account_id, token.access)
+        if self.api_key:
+            headers = _build_api_key_headers(self.api_key, self.extra_headers)
+            url = _resolve_responses_url(self.api_base)
+        else:
+            token = await asyncio.to_thread(get_codex_token)
+            headers = _build_oauth_headers(token.account_id, token.access)
+            url = DEFAULT_CODEX_URL
 
         body: dict[str, Any] = {
             "model": _strip_model_prefix(model),
@@ -53,8 +65,6 @@ class OpenAICodexProvider(LLMProvider):
 
         if tools:
             body["tools"] = _convert_tools(tools)
-
-        url = DEFAULT_CODEX_URL
 
         try:
             try:
@@ -90,7 +100,7 @@ def _strip_model_prefix(model: str) -> str:
     return model
 
 
-def _build_headers(account_id: str, token: str) -> dict[str, str]:
+def _build_oauth_headers(account_id: str, token: str) -> dict[str, str]:
     return {
         "Authorization": f"Bearer {token}",
         "chatgpt-account-id": account_id,
@@ -101,6 +111,29 @@ def _build_headers(account_id: str, token: str) -> dict[str, str]:
         "content-type": "application/json",
     }
 
+
+
+
+def _build_api_key_headers(api_key: str, extra_headers: dict[str, str] | None = None) -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {api_key}",
+        "OpenAI-Beta": "responses=experimental",
+        "User-Agent": "nano-alice (python)",
+        "accept": "text/event-stream",
+        "content-type": "application/json",
+        **(extra_headers or {}),
+    }
+
+
+def _resolve_responses_url(api_base: str | None) -> str:
+    if not api_base:
+        return DEFAULT_CODEX_URL
+    base = api_base.rstrip("/")
+    if base.endswith("/responses"):
+        return base
+    if base.endswith("/v1"):
+        return f"{base}/responses"
+    return f"{base}/v1/responses"
 
 async def _request_codex(
     url: str,

@@ -7,9 +7,8 @@ from typer.testing import CliRunner
 
 from nano_alice.cli.commands import app, _make_provider
 from nano_alice.config.schema import Config
-from nano_alice.providers.custom_provider import CustomProvider
 from nano_alice.providers.litellm_provider import LiteLLMProvider
-from nano_alice.providers.openai_codex_provider import _strip_model_prefix
+from nano_alice.providers.openai_codex_provider import OpenAICodexProvider, _strip_model_prefix
 from nano_alice.providers.registry import find_by_model
 
 runner = CliRunner()
@@ -133,7 +132,7 @@ def test_openai_codex_strip_prefix_supports_hyphen_and_underscore():
     assert _strip_model_prefix("openaiCodex/gpt-5.4") == "gpt-5.4"
 
 
-def test_make_provider_uses_custom_for_openai_codex_when_api_key_configured():
+def test_make_provider_uses_responses_provider_for_openai_codex_when_api_key_configured():
     config = Config()
     config.agents.defaults.model = "openaiCodex/gpt-5.4"
     config.providers.openai_codex.api_key = "sk-test"
@@ -141,7 +140,7 @@ def test_make_provider_uses_custom_for_openai_codex_when_api_key_configured():
 
     provider = _make_provider(config)
 
-    assert isinstance(provider, CustomProvider)
-    assert provider.default_model == "gpt-5.4"
+    assert isinstance(provider, OpenAICodexProvider)
+    assert provider.default_model == "openaiCodex/gpt-5.4"
     assert provider.api_key == "sk-test"
     assert provider.api_base == "https://example.com/v1"
