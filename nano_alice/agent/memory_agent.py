@@ -99,6 +99,45 @@ explicitly contradicts. Keep MEMORY.md ≤5KB.
 ### 5. Stop
 Reply with a one-line summary. Do NOT continue calling tools after writes are done."""
 
+_MAINTENANCE_SYSTEM_PROMPT = """\
+You are a memory maintenance agent. Reconcile and clean existing memory files.
+
+## Goal
+- Review the existing standard memory files and improve consistency.
+- Fix likely hallucinations or wrong placements that may have been written previously.
+- Keep the current file scope and responsibilities.
+
+## Hard rules
+- Do NOT invent any new facts.
+- Only use facts already present in the existing memory files.
+- If a statement is uncertain, contradictory, or looks hallucinated, prefer removing it from long-term files or downgrading it rather than strengthening it.
+- Stay within the managed files. Do NOT create daily logs or ad-hoc files.
+- Keep changes minimal and conservative.
+
+## File responsibilities
+- `memory/MEMORY.md`: stable long-term facts and preferences only.
+- `memory/projects.md`: current active project status, blockers, next steps, delivery state.
+- `memory/lessons.md`: reusable lessons and rules only.
+- `memory/HISTORY.md`: important events worth later recall.
+- `memory/SCRATCH.md`: short-term summaries; can be compacted.
+- `memory/schedule.md`: schedules and recurring time-based information.
+
+## Maintenance tasks
+1. Read all listed managed files that exist.
+2. Remove duplicates and merge repeated statements.
+3. Fix obvious file misplacements (for example, move project status out of MEMORY.md into projects.md).
+4. Resolve contradictions conservatively using the most recent or most clearly supported wording already present in the files.
+5. Keep `MEMORY.md` concise and stable.
+6. Avoid broad rewrites when no real cleanup is needed.
+
+## Write policy
+- `memory/MEMORY.md`, `memory/projects.md`, `memory/lessons.md`, `memory/schedule.md`: prefer targeted updates or full rewrites only when needed.
+- `memory/HISTORY.md` and `memory/SCRATCH.md`: maintenance mode may rewrite these files to remove duplication or compress noise.
+
+## Stop condition
+If no meaningful cleanup is needed, reply with a one-line summary and make zero writes.
+After writes are complete, reply with a one-line summary and stop."""
+
 _TOOLS = [
     {
         "type": "function",
@@ -210,6 +249,14 @@ class MemoryAgent:
     _APPEND_ONLY_FILES = {"memory/HISTORY.md", "memory/SCRATCH.md"}
     _UPDATE_PREFERRED_FILES = {"memory/MEMORY.md", "memory/projects.md", "memory/lessons.md"}
     _DAILY_LOG_RE = re.compile(r"^memory/\d{4}-\d{2}-\d{2}\.md$")
+    _MAINTENANCE_TARGET_FILES = [
+        "memory/MEMORY.md",
+        "memory/HISTORY.md",
+        "memory/SCRATCH.md",
+        "memory/projects.md",
+        "memory/lessons.md",
+        "memory/schedule.md",
+    ]
 
     def __init__(
         self,
@@ -224,6 +271,7 @@ class MemoryAgent:
         self._memory_dir = workspace / "memory"
         self._memory_dir.mkdir(parents=True, exist_ok=True)
         self._allow_scratch_overwrite = False
+        self._maintenance_mode = False
 
         # Build memory_search index if embeddings available
         self._memory_index = None
@@ -388,6 +436,89 @@ Before writing new information, check if these facts already exist. Update exist
         finally:
             self._allow_scratch_overwrite = False
 
+    async def run_maintenance(self) -> str:
+        """Reconcile existing managed memory files."""
+        listed_files = []
+        for rel in self._MAINTENANCE_TARGET_FILES:
+            if self._resolve(rel).exists():
+                listed_files.append(rel)
+
+        if not listed_files:
+            logger.info("Memory maintenance skipped: no managed memory files found")
+            return "No managed memory files found."
+
+        user_prompt = (
+            "## Managed Files\n"
+            + "\n".join(f"- {path}" for path in listed_files)
+            + "\n\nRead the existing files, reconcile them conservatively, and only write if cleanup is truly needed."
+        )
+
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": _MAINTENANCE_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ]
+
+        self._maintenance_mode = True
+        self._allow_scratch_overwrite = True
+        final_summary = "Memory maintenance finished."
+        try:
+            for iteration in range(self.MAX_ITERATIONS):
+                try:
+                    response = await self._provider.chat(
+                        messages=messages,
+                        tools=_TOOLS,
+                        model=self._model,
+                    )
+                except Exception as e:
+                    logger.error("Memory maintenance LLM call failed (iter {}): {}", iteration, e)
+                    return f"Error: {e}"
+
+                if not response.has_tool_calls:
+                    final_summary = response.content or final_summary
+                    logger.info("Memory maintenance done after {} iterations", iteration + 1)
+                    return final_summary
+
+                tool_call_dicts = [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.name,
+                            "arguments": json.dumps(tc.arguments, ensure_ascii=False),
+                        },
+                    }
+                    for tc in response.tool_calls
+                ]
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": response.content,
+                        "tool_calls": tool_call_dicts,
+                    }
+                )
+
+                for tc in response.tool_calls:
+                    logger.info(
+                        "Memory maintenance tool: {}({})",
+                        tc.name,
+                        json.dumps(tc.arguments, ensure_ascii=False)[:200],
+                    )
+                    result = await self._execute_tool(tc.name, tc.arguments)
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "name": tc.name,
+                            "content": result,
+                        }
+                    )
+
+            logger.warning("Memory maintenance hit max iterations ({})", self.MAX_ITERATIONS)
+            return final_summary
+        finally:
+            self._maintenance_mode = False
+            self._allow_scratch_overwrite = False
+
     async def _execute_tool(self, name: str, args: dict) -> str:
         """Execute a tool call within the workspace."""
         try:
@@ -431,8 +562,19 @@ Before writing new information, check if these facts already exist. Update exist
         if normalized == "memory/SCRATCH.md" and op != "append_file" and not self._allow_scratch_overwrite:
             return "Error: SCRATCH.md is append-only outside cleanup"
 
-        if normalized in self._APPEND_ONLY_FILES and op == "edit_file":
+        if (
+            normalized in self._APPEND_ONLY_FILES
+            and op == "edit_file"
+            and not self._maintenance_mode
+        ):
             return f"Error: {normalized} is append-only"
+
+        if (
+            normalized == "memory/HISTORY.md"
+            and op == "write_file"
+            and not self._maintenance_mode
+        ):
+            return "Error: use append_file for memory/HISTORY.md outside maintenance"
 
         if normalized in self._UPDATE_PREFERRED_FILES and op == "append_file":
             return f"Error: use edit_file or write_file for {normalized}"

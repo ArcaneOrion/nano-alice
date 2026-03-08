@@ -8,7 +8,7 @@ import re
 import time
 from contextlib import AsyncExitStack
 from pathlib import Path
-from typing import TYPE_CHECKING, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from loguru import logger
 
@@ -656,7 +656,19 @@ class AgentLoop:
             return OutboundMessage(
                 channel=msg.channel,
                 chat_id=msg.chat_id,
-                content="🐈 nano-alice commands:\n/new — Start a new conversation\n/help — Show available commands",
+                content=(
+                    "🐈 nano-alice commands:\n"
+                    "/new — Start a new conversation\n"
+                    "/memory — Reconcile existing memory files\n"
+                    "/help — Show available commands"
+                ),
+            )
+        if cmd == "/memory":
+            result = await self.run_memory_maintenance()
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=self._format_memory_maintenance_result(result),
             )
 
         if len(session.messages) > self.memory_window and session.key not in self._consolidating:
@@ -898,6 +910,76 @@ class AgentLoop:
         except Exception as e:
             logger.error("Memory agent failed: {}", e)
             # Cursor not advanced — next run will retry the same messages
+
+    async def run_memory_maintenance(self) -> dict[str, Any]:
+        """Reconcile existing managed memory files globally."""
+        from nano_alice.agent.memory_agent import MemoryAgent
+
+        managed_files = [
+            self.workspace / "memory" / "MEMORY.md",
+            self.workspace / "memory" / "HISTORY.md",
+            self.workspace / "memory" / "SCRATCH.md",
+            self.workspace / "memory" / "projects.md",
+            self.workspace / "memory" / "lessons.md",
+            self.workspace / "memory" / "schedule.md",
+        ]
+        before: dict[str, str] = {}
+        files_scanned: list[str] = []
+        for path in managed_files:
+            if path.exists():
+                rel = str(path.relative_to(self.workspace)).replace("\\", "/")
+                files_scanned.append(rel)
+                before[rel] = path.read_text(encoding="utf-8")
+
+        agent = MemoryAgent(
+            provider=self._memory_provider,
+            workspace=self.workspace,
+            model=self._memory_agent_model,
+            embeddings_config=self.embeddings_config,
+        )
+        try:
+            summary = await agent.run_maintenance()
+        except Exception as e:
+            logger.error("Memory maintenance failed: {}", e)
+            return {
+                "status": "failed",
+                "files_scanned": files_scanned,
+                "files_modified": [],
+                "summary": "",
+                "error": str(e),
+            }
+
+        files_modified: list[str] = []
+        for rel in files_scanned:
+            path = self.workspace / rel
+            after = path.read_text(encoding="utf-8") if path.exists() else ""
+            if before.get(rel, "") != after:
+                files_modified.append(rel)
+
+        status = "done" if files_modified else "noop"
+        return {
+            "status": status,
+            "files_scanned": files_scanned,
+            "files_modified": files_modified,
+            "summary": summary,
+            "error": "",
+        }
+
+    @staticmethod
+    def _format_memory_maintenance_result(result: dict[str, Any]) -> str:
+        if result.get("status") == "failed":
+            return f"记忆整理失败：{result.get('error') or 'unknown error'}"
+
+        scanned = len(result.get("files_scanned") or [])
+        modified = result.get("files_modified") or []
+        summary = (result.get("summary") or "").strip()
+        if not modified:
+            base = f"记忆整理完成：扫描 {scanned} 个文件，未发现需要整理的内容。"
+            return f"{base}\n{summary}" if summary else base
+
+        base = f"记忆整理完成：扫描 {scanned} 个文件，更新 {len(modified)} 个文件。"
+        detail = "更新文件：" + "、".join(modified)
+        return f"{base}\n{detail}\n{summary}" if summary else f"{base}\n{detail}"
 
     async def process_direct(
         self,
