@@ -124,7 +124,10 @@ _TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Directory path relative to workspace."},
+                    "path": {
+                        "type": "string",
+                        "description": "Directory path relative to workspace.",
+                    },
                 },
                 "required": ["path"],
             },
@@ -183,10 +186,9 @@ class MemoryAgent:
 
         # Build memory_search index if embeddings available
         self._memory_index = None
-        if (embeddings_config
-                and embeddings_config.api_key
-                and embeddings_config.api_base):
+        if embeddings_config and embeddings_config.api_key and embeddings_config.api_base:
             from nano_alice.agent.tools.memory_search import _MemoryIndex
+
             self._memory_index = _MemoryIndex(
                 memory_dir=self._memory_dir,
                 api_base=embeddings_config.api_base,
@@ -216,6 +218,7 @@ class MemoryAgent:
         context_messages: list[dict] | None = None,
         cleanup_scratch: bool = False,
         memory_priority: str = "normal",
+        pre_search_results: list[dict] | None = None,
     ) -> None:
         """Extract memory from recent messages. Runs silently in background.
 
@@ -224,6 +227,7 @@ class MemoryAgent:
             context_messages: Optional older messages for background understanding (read-only).
             cleanup_scratch: If True, also clean up SCRATCH.md (compress entries older than 48h).
             memory_priority: "high" if user explicitly asked to remember something.
+            pre_search_results: RAG search results to avoid duplicate embedding calls.
         """
         if not new_messages:
             return
@@ -245,13 +249,28 @@ class MemoryAgent:
         new_header = "## New Conversation (extract from this)\n"
         if memory_priority == "high":
             new_header += (
-                "\n**PRIORITY: HIGH** — 用户明确要求记住某些信息，"
-                "务必写入记忆文件，不要跳过。\n"
+                "\n**PRIORITY: HIGH** — 用户明确要求记住某些信息，务必写入记忆文件，不要跳过。\n"
             )
         sections.append(new_header + "\n" + new_lines)
 
         conversation_text = "\n\n".join(sections)
         system = _SYSTEM_PROMPT.format(memory_dir=self._memory_dir)
+
+        # 如果有预搜索结果，注入到 system prompt 作为已有记忆参考（去重检查）
+        if pre_search_results:
+            existing = "\n\n".join(
+                f"[{r['file']} L{r['lines']}] {r['text']}" for r in pre_search_results
+            )
+            system += f"""
+
+## Existing Memory (for deduplication check)
+
+The following information already exists in memory:
+
+{existing}
+
+Before writing new information, check if these facts already exist. Update existing entries instead of duplicating.
+"""
 
         if cleanup_scratch:
             system += (
@@ -297,23 +316,30 @@ class MemoryAgent:
                 }
                 for tc in response.tool_calls
             ]
-            messages.append({
-                "role": "assistant",
-                "content": response.content,
-                "tool_calls": tool_call_dicts,
-            })
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": response.content,
+                    "tool_calls": tool_call_dicts,
+                }
+            )
 
             # Execute each tool call
             for tc in response.tool_calls:
-                logger.info("Memory agent tool: {}({})", tc.name,
-                            json.dumps(tc.arguments, ensure_ascii=False)[:200])
+                logger.info(
+                    "Memory agent tool: {}({})",
+                    tc.name,
+                    json.dumps(tc.arguments, ensure_ascii=False)[:200],
+                )
                 result = await self._execute_tool(tc.name, tc.arguments)
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "name": tc.name,
-                    "content": result,
-                })
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "name": tc.name,
+                        "content": result,
+                    }
+                )
 
         logger.warning("Memory agent hit max iterations ({})", self.MAX_ITERATIONS)
 
@@ -362,7 +388,7 @@ class MemoryAgent:
         tail_keep = self._READ_LIMIT - self._HEAD_KEEP
         skipped = len(text) - self._READ_LIMIT
         return (
-            text[:self._HEAD_KEEP]
+            text[: self._HEAD_KEEP]
             + f"\n\n... [{skipped} chars truncated, use memory_search for full content] ...\n\n"
             + text[-tail_keep:]
         )
@@ -396,9 +422,7 @@ class MemoryAgent:
         if not dp.is_dir():
             return f"Not a directory: {path}"
         entries = sorted(dp.iterdir())
-        return "\n".join(
-            f"{'[dir] ' if e.is_dir() else ''}{e.name}" for e in entries[:50]
-        )
+        return "\n".join(f"{'[dir] ' if e.is_dir() else ''}{e.name}" for e in entries[:50])
 
     async def _memory_search(self, query: str, top_k: int = 5) -> str:
         if not self._memory_index:

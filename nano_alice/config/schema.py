@@ -29,7 +29,9 @@ class TelegramConfig(Base):
     enabled: bool = False
     token: str = ""  # Bot token from @BotFather
     allow_from: list[str] = Field(default_factory=list)  # Allowed user IDs or usernames
-    proxy: str | None = None  # HTTP/SOCKS5 proxy URL, e.g. "http://127.0.0.1:7890" or "socks5://127.0.0.1:1080"
+    proxy: str | None = (
+        None  # HTTP/SOCKS5 proxy URL, e.g. "http://127.0.0.1:7890" or "socks5://127.0.0.1:1080"
+    )
     reply_to_message: bool = False  # If true, bot replies quote the original message
 
 
@@ -87,7 +89,9 @@ class EmailConfig(Base):
     from_address: str = ""
 
     # Behavior
-    auto_reply_enabled: bool = True  # If false, inbound email is read but no automatic reply is sent
+    auto_reply_enabled: bool = (
+        True  # If false, inbound email is read but no automatic reply is sent
+    )
     poll_interval_seconds: int = 30
     mark_seen: bool = True
     max_body_chars: int = 12000
@@ -164,7 +168,9 @@ class QQConfig(Base):
     enabled: bool = False
     app_id: str = ""  # 机器人 ID (AppID) from q.qq.com
     secret: str = ""  # 机器人密钥 (AppSecret) from q.qq.com
-    allow_from: list[str] = Field(default_factory=list)  # Allowed user openids (empty = public access)
+    allow_from: list[str] = Field(
+        default_factory=list
+    )  # Allowed user openids (empty = public access)
 
 
 class ChannelsConfig(Base):
@@ -202,6 +208,7 @@ class MemoryAgentConfig(Base):
     model: str = ""  # empty = use main agent model
     api_key: str = ""  # empty = auto-match from providers
     api_base: str = ""  # empty = auto-match from providers
+    interval: int = 10  # 强制运行间隔（轮数），默认 10
 
 
 class AgentsConfig(Base):
@@ -238,9 +245,15 @@ class ProvidersConfig(Base):
     moonshot: ProviderConfig = Field(default_factory=ProviderConfig)
     minimax: ProviderConfig = Field(default_factory=ProviderConfig)
     aihubmix: ProviderConfig = Field(default_factory=ProviderConfig)  # AiHubMix API gateway
-    wanqing: ProviderConfig = Field(default_factory=ProviderConfig)  # 快手万擎 (Kuaishou Wanqing) API gateway
-    siliconflow: ProviderConfig = Field(default_factory=ProviderConfig)  # SiliconFlow (硅基流动) API gateway
-    volcengine: ProviderConfig = Field(default_factory=ProviderConfig)  # VolcEngine (火山引擎) API gateway
+    wanqing: ProviderConfig = Field(
+        default_factory=ProviderConfig
+    )  # 快手万擎 (Kuaishou Wanqing) API gateway
+    siliconflow: ProviderConfig = Field(
+        default_factory=ProviderConfig
+    )  # SiliconFlow (硅基流动) API gateway
+    volcengine: ProviderConfig = Field(
+        default_factory=ProviderConfig
+    )  # VolcEngine (火山引擎) API gateway
     openai_codex: ProviderConfig = Field(default_factory=ProviderConfig)  # OpenAI Codex (OAuth)
     github_copilot: ProviderConfig = Field(default_factory=ProviderConfig)  # Github Copilot (OAuth)
 
@@ -264,8 +277,8 @@ class GatewayConfig(Base):
 class WebSearchConfig(Base):
     """Web search tool configuration."""
 
-    api_key: str = ""          # Brave Search API key
-    tavily_api_key: str = ""   # Tavily Search API key (takes priority over Brave when set)
+    api_key: str = ""  # Brave Search API key
+    tavily_api_key: str = ""  # Tavily Search API key (takes priority over Brave when set)
     max_results: int = 5
 
 
@@ -294,10 +307,10 @@ class MCPServerConfig(Base):
 class EmbeddingsConfig(Base):
     """Embedding API configuration for semantic memory search."""
 
-    api_base: str = ""          # e.g. "https://ai.hybgzs.com"
+    api_base: str = ""  # e.g. "https://ai.hybgzs.com"
     api_key: str = ""
-    model: str = ""             # e.g. "Qwen/Qwen3-Embedding-4B"
-    dimensions: int = 0         # 0 = use model default (don't send dimensions param)
+    model: str = ""  # e.g. "Qwen/Qwen3-Embedding-4B"
+    dimensions: int = 0  # 0 = use model default (don't send dimensions param)
     extra_headers: dict[str, str] = Field(default_factory=dict)
     rag_min_score: float = 0.35  # Minimum cosine similarity for RAG injection (0.0 = no filter)
 
@@ -433,7 +446,9 @@ class Config(BaseSettings):
         p, _ = self._match_provider(model, provider_name)
         return p
 
-    def get_provider_name(self, model: str | None = None, provider_name: str | None = None) -> str | None:
+    def get_provider_name(
+        self, model: str | None = None, provider_name: str | None = None
+    ) -> str | None:
         """Get the registry name of the matched provider (e.g. "deepseek", "openrouter")."""
         _, name = self._match_provider(model, provider_name)
         return name
@@ -443,7 +458,9 @@ class Config(BaseSettings):
         p = self.get_provider(model, provider_name)
         return p.api_key if p else None
 
-    def get_api_base(self, model: str | None = None, provider_name: str | None = None) -> str | None:
+    def get_api_base(
+        self, model: str | None = None, provider_name: str | None = None
+    ) -> str | None:
         """Get API base URL for the given model. Applies default URLs for known gateways."""
         from nano_alice.providers.registry import find_by_name
 
