@@ -256,9 +256,11 @@ class _StubProvider(LLMProvider):
         self.name = name
         self.responses = list(responses)
         self.calls = 0
+        self.received_models: list[str | None] = []
 
     async def chat(self, messages, tools=None, model=None, max_tokens=4096, temperature=0.7):
         self.calls += 1
+        self.received_models.append(model)
         if self.responses:
             return self.responses.pop(0)
         return LLMResponse(content=f"{self.name}-ok", finish_reason="stop")
@@ -275,13 +277,15 @@ def test_rotating_provider_fails_over_to_fallback_and_sticks_during_cooldown():
     second = _StubProvider("openai2/gpt-5.4", [LLMResponse(content="second-ok"), LLMResponse(content="second-still-ok")])
     provider = RotatingProvider(first, [second], cooldown_seconds=900, time_fn=lambda: 0.0)
 
-    response1 = asyncio.run(provider.chat(messages=[{"role": "user", "content": "hi"}]))
-    response2 = asyncio.run(provider.chat(messages=[{"role": "user", "content": "again"}]))
+    response1 = asyncio.run(provider.chat(messages=[{"role": "user", "content": "hi"}], model="anthropic/claude-opus-4-5-20251101"))
+    response2 = asyncio.run(provider.chat(messages=[{"role": "user", "content": "again"}], model="anthropic/claude-opus-4-5-20251101"))
 
     assert response1.content == "second-ok"
     assert response2.content == "second-still-ok"
     assert first.calls == 1
     assert second.calls == 2
+    assert first.received_models == ["anthropic/claude-opus-4-5-20251101"]
+    assert second.received_models == [None, None]
 
 
 def test_rotating_provider_retries_primary_after_cooldown():

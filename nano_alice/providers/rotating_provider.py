@@ -95,7 +95,7 @@ class RotatingProvider(LLMProvider):
                 self.fallback_providers[index],
                 messages=messages,
                 tools=tools,
-                model=model,
+                model=None,
                 max_tokens=max_tokens,
                 temperature=temperature,
             )
