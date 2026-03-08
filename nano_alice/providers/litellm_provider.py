@@ -1,7 +1,5 @@
 """LiteLLM provider implementation for multi-provider support."""
 
-import json
-import json_repair
 import os
 from typing import Any
 
@@ -13,7 +11,7 @@ patch_httpx_for_utf8_headers()
 import litellm
 from litellm import acompletion
 
-from nano_alice.providers.base import LLMProvider, LLMResponse, ToolCallRequest
+from nano_alice.providers.base import LLMProvider, LLMResponse, parse_llm_response_payload
 from nano_alice.providers.registry import find_by_model, find_gateway
 
 
@@ -237,40 +235,7 @@ class LiteLLMProvider(LLMProvider):
     
     def _parse_response(self, response: Any) -> LLMResponse:
         """Parse LiteLLM response into our standard format."""
-        choice = response.choices[0]
-        message = choice.message
-        
-        tool_calls = []
-        if hasattr(message, "tool_calls") and message.tool_calls:
-            for tc in message.tool_calls:
-                # Parse arguments from JSON string if needed
-                args = tc.function.arguments
-                if isinstance(args, str):
-                    args = json_repair.loads(args)
-                
-                tool_calls.append(ToolCallRequest(
-                    id=tc.id,
-                    name=tc.function.name,
-                    arguments=args,
-                ))
-        
-        usage = {}
-        if hasattr(response, "usage") and response.usage:
-            usage = {
-                "prompt_tokens": response.usage.prompt_tokens,
-                "completion_tokens": response.usage.completion_tokens,
-                "total_tokens": response.usage.total_tokens,
-            }
-        
-        reasoning_content = getattr(message, "reasoning_content", None)
-        
-        return LLMResponse(
-            content=message.content,
-            tool_calls=tool_calls,
-            finish_reason=choice.finish_reason or "stop",
-            usage=usage,
-            reasoning_content=reasoning_content,
-        )
+        return parse_llm_response_payload(response)
     
     def get_default_model(self) -> str:
         """Get the default model."""
