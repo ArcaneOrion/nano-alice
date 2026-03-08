@@ -303,57 +303,92 @@ def _make_provider(
     from nano_alice.providers.litellm_provider import LiteLLMProvider
     from nano_alice.providers.openai_codex_provider import OpenAICodexProvider
     from nano_alice.providers.custom_provider import CustomProvider
+    from nano_alice.providers.rotating_provider import RotatingProvider
+
+    def _build_single_provider(resolved_model: str, resolved_provider_name: str | None = None):
+        resolved_provider_name = config.get_provider_name(resolved_model, resolved_provider_name)
+        provider_config = config.get_provider(resolved_model, resolved_provider_name)
+
+        if resolved_provider_name == "openai_codex":
+            if provider_config and (provider_config.api_key or provider_config.api_base):
+                return OpenAICodexProvider(
+                    default_model=resolved_model,
+                    api_key=provider_config.api_key if provider_config else None,
+                    api_base=config.get_api_base(resolved_model, resolved_provider_name),
+                    extra_headers=provider_config.extra_headers if provider_config else None,
+                )
+            return OpenAICodexProvider(default_model=resolved_model)
+
+        if resolved_provider_name in Config.OPENAI_ROUTE_NAMES:
+            return CustomProvider(
+                api_key=provider_config.api_key if provider_config else "no-key",
+                api_base=config.get_api_base(resolved_model, resolved_provider_name) or "https://api.openai.com/v1",
+                default_model=resolved_model.split("/", 1)[1] if "/" in resolved_model else resolved_model,
+            )
+
+        if resolved_provider_name == "openai" and provider_config and provider_config.api_base:
+            custom_model = resolved_model.split("/", 1)[1] if resolved_model.lower().startswith("openai/") else resolved_model
+            return CustomProvider(
+                api_key=provider_config.api_key if provider_config else "no-key",
+                api_base=config.get_api_base(resolved_model, resolved_provider_name) or "https://api.openai.com/v1",
+                default_model=custom_model,
+            )
+
+        if resolved_provider_name == "custom":
+            return CustomProvider(
+                api_key=provider_config.api_key if provider_config else "no-key",
+                api_base=config.get_api_base(resolved_model, resolved_provider_name) or "http://localhost:8000/v1",
+                default_model=resolved_model,
+            )
+
+        from nano_alice.providers.registry import find_by_name
+        spec = find_by_name(resolved_provider_name)
+        if not resolved_model.startswith("bedrock/") and not (provider_config and provider_config.api_key) and not (spec and spec.is_oauth):
+            console.print("[red]Error: No API key configured.[/red]")
+            console.print("Set one in ~/.nano-alice/config.json under providers section")
+            raise typer.Exit(1)
+
+        return LiteLLMProvider(
+            api_key=provider_config.api_key if provider_config else None,
+            api_base=config.get_api_base(resolved_model, resolved_provider_name),
+            default_model=resolved_model,
+            extra_headers=provider_config.extra_headers if provider_config else None,
+            provider_name=resolved_provider_name,
+        )
+
+    def _normalize_model_identifier(value: str) -> str:
+        if "/" not in value:
+            return value.strip().lower()
+        prefix, remainder = value.split("/", 1)
+        normalized_prefix = config._normalize_provider_key(prefix) or prefix.lower().replace("-", "_")
+        return f"{normalized_prefix}/{remainder}"
 
     using_default_model = model is None
+    default_models = config.agents.defaults.models if using_default_model else []
+    if using_default_model and default_models:
+        configured_model = config.agents.defaults.model
+        model_fields_set = getattr(config.agents.defaults, "model_fields_set", set())
+        primary_model = configured_model
+        if "model" not in model_fields_set and default_models:
+            primary_model = default_models[0]
+
+        normalized_primary = _normalize_model_identifier(primary_model)
+        fallback_models: list[str] = []
+        seen_fallbacks: set[str] = set()
+        for candidate in default_models:
+            normalized_candidate = _normalize_model_identifier(candidate)
+            if normalized_candidate == normalized_primary or normalized_candidate in seen_fallbacks:
+                continue
+            seen_fallbacks.add(normalized_candidate)
+            fallback_models.append(candidate)
+
+        primary_provider = _build_single_provider(primary_model)
+        fallback_providers = [_build_single_provider(candidate) for candidate in fallback_models]
+        return RotatingProvider(primary_provider, fallback_providers)
+
     model = model or config.agents.defaults.model
     provider_name = provider_name or (config.agents.defaults.provider if using_default_model else None)
-    provider_name = config.get_provider_name(model, provider_name)
-    p = config.get_provider(model, provider_name)
-
-    # OpenAI Codex: use Responses API for both OAuth and API-key gateway modes.
-    if provider_name == "openai_codex":
-        if p and (p.api_key or p.api_base):
-            return OpenAICodexProvider(
-                default_model=model,
-                api_key=p.api_key if p else None,
-                api_base=config.get_api_base(model, provider_name),
-                extra_headers=p.extra_headers if p else None,
-            )
-        return OpenAICodexProvider(default_model=model)
-
-    # OpenAI-compatible proxies often implement only `/chat/completions`.
-    # Route explicit custom bases through the direct OpenAI-compatible client
-    # to avoid LiteLLM selecting Responses-format handling for GPT-5 models.
-    if provider_name == "openai" and p and p.api_base:
-        custom_model = model.split("/", 1)[1] if model.lower().startswith("openai/") else model
-        return CustomProvider(
-            api_key=p.api_key if p else "no-key",
-            api_base=config.get_api_base(model, provider_name) or "https://api.openai.com/v1",
-            default_model=custom_model,
-        )
-
-    # Custom: direct OpenAI-compatible endpoint, bypasses LiteLLM
-    if provider_name == "custom":
-        return CustomProvider(
-            api_key=p.api_key if p else "no-key",
-            api_base=config.get_api_base(model, provider_name) or "http://localhost:8000/v1",
-            default_model=model,
-        )
-
-    from nano_alice.providers.registry import find_by_name
-    spec = find_by_name(provider_name)
-    if not model.startswith("bedrock/") and not (p and p.api_key) and not (spec and spec.is_oauth):
-        console.print("[red]Error: No API key configured.[/red]")
-        console.print("Set one in ~/.nano-alice/config.json under providers section")
-        raise typer.Exit(1)
-
-    return LiteLLMProvider(
-        api_key=p.api_key if p else None,
-        api_base=config.get_api_base(model, provider_name),
-        default_model=model,
-        extra_headers=p.extra_headers if p else None,
-        provider_name=provider_name,
-    )
+    return _build_single_provider(model, provider_name)
 
 
 def _make_memory_provider(config: Config):

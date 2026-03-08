@@ -1,4 +1,5 @@
 import shutil
+import asyncio
 from pathlib import Path
 from unittest.mock import patch
 
@@ -7,9 +8,11 @@ from typer.testing import CliRunner
 
 from nano_alice.cli.commands import app, _make_provider
 from nano_alice.config.schema import Config
-from nano_alice.providers.litellm_provider import LiteLLMProvider
+from nano_alice.providers.base import LLMProvider, LLMResponse
 from nano_alice.providers.custom_provider import CustomProvider
+from nano_alice.providers.litellm_provider import LiteLLMProvider
 from nano_alice.providers.openai_codex_provider import OpenAICodexProvider, _strip_model_prefix
+from nano_alice.providers.rotating_provider import RotatingProvider
 from nano_alice.providers.registry import find_by_model
 
 runner = CliRunner()
@@ -185,3 +188,132 @@ def test_make_provider_uses_explicit_openai_codex_route():
     assert provider.default_model == "gpt-5.4"
     assert provider.api_key == "sk-test"
     assert provider.api_base == "https://example.com/v1"
+
+
+def test_config_matches_explicit_openai_route_prefix():
+    config = Config()
+    config.agents.defaults.model = "openai2/gpt-5.4"
+    config.providers.openai_2.api_key = "sk-route-2"
+    config.providers.openai_2.api_base = "https://route-2.example.com/v1"
+
+    assert config.get_provider_name() == "openai_2"
+    assert config.get_api_base() == "https://route-2.example.com/v1"
+
+
+def test_make_provider_uses_custom_provider_for_explicit_openai_route():
+    config = Config()
+    config.agents.defaults.model = "openai1/gpt-5.4"
+    config.providers.openai_1.api_key = "sk-route-1"
+    config.providers.openai_1.api_base = "https://route-1.example.com/v1"
+
+    provider = _make_provider(config)
+
+    assert isinstance(provider, CustomProvider)
+    assert provider.default_model == "gpt-5.4"
+    assert provider.api_key == "sk-route-1"
+    assert provider.api_base == "https://route-1.example.com/v1"
+
+
+def test_make_provider_uses_rotating_provider_for_default_models():
+    config = Config()
+    config.agents.defaults.model = "openai1/gpt-5.4"
+    config.agents.defaults.models = ["openai1/gpt-5.4", "openai2/gpt-5.4", "openai3/gpt-5.4"]
+    config.providers.openai_1.api_key = "sk-route-1"
+    config.providers.openai_1.api_base = "https://route-1.example.com/v1"
+    config.providers.openai_2.api_key = "sk-route-2"
+    config.providers.openai_2.api_base = "https://route-2.example.com/v1"
+    config.providers.openai_3.api_key = "sk-route-3"
+    config.providers.openai_3.api_base = "https://route-3.example.com/v1"
+
+    provider = _make_provider(config)
+
+    assert isinstance(provider, RotatingProvider)
+    assert provider.primary_provider.api_base == "https://route-1.example.com/v1"
+    assert [child.api_base for child in provider.fallback_providers] == [
+        "https://route-2.example.com/v1",
+        "https://route-3.example.com/v1",
+    ]
+
+
+def test_make_provider_uses_first_fallback_as_primary_when_model_not_explicitly_set():
+    config = Config()
+    config.agents.defaults.models = ["openai1/gpt-5.4", "openai2/gpt-5.4"]
+    config.providers.openai_1.api_key = "sk-route-1"
+    config.providers.openai_1.api_base = "https://route-1.example.com/v1"
+    config.providers.openai_2.api_key = "sk-route-2"
+    config.providers.openai_2.api_base = "https://route-2.example.com/v1"
+
+    provider = _make_provider(config)
+
+    assert isinstance(provider, RotatingProvider)
+    assert provider.primary_provider.api_base == "https://route-1.example.com/v1"
+    assert [child.api_base for child in provider.fallback_providers] == ["https://route-2.example.com/v1"]
+
+
+class _StubProvider(LLMProvider):
+    def __init__(self, name: str, responses: list[LLMResponse]):
+        super().__init__()
+        self.name = name
+        self.responses = list(responses)
+        self.calls = 0
+
+    async def chat(self, messages, tools=None, model=None, max_tokens=4096, temperature=0.7):
+        self.calls += 1
+        if self.responses:
+            return self.responses.pop(0)
+        return LLMResponse(content=f"{self.name}-ok", finish_reason="stop")
+
+    def get_default_model(self) -> str:
+        return self.name
+
+
+def test_rotating_provider_fails_over_to_fallback_and_sticks_during_cooldown():
+    first = _StubProvider(
+        "openai1/gpt-5.4",
+        [LLMResponse(content="Error: rate limited", finish_reason="error")],
+    )
+    second = _StubProvider("openai2/gpt-5.4", [LLMResponse(content="second-ok"), LLMResponse(content="second-still-ok")])
+    provider = RotatingProvider(first, [second], cooldown_seconds=900, time_fn=lambda: 0.0)
+
+    response1 = asyncio.run(provider.chat(messages=[{"role": "user", "content": "hi"}]))
+    response2 = asyncio.run(provider.chat(messages=[{"role": "user", "content": "again"}]))
+
+    assert response1.content == "second-ok"
+    assert response2.content == "second-still-ok"
+    assert first.calls == 1
+    assert second.calls == 2
+
+
+def test_rotating_provider_retries_primary_after_cooldown():
+    now = {"value": 0.0}
+    first = _StubProvider(
+        "openai1/gpt-5.4",
+        [LLMResponse(content="Error: rate limited", finish_reason="error"), LLMResponse(content="primary-recovered")],
+    )
+    second = _StubProvider("openai2/gpt-5.4", [LLMResponse(content="fallback-ok")])
+    provider = RotatingProvider(first, [second], cooldown_seconds=900, time_fn=lambda: now["value"])
+
+    response1 = asyncio.run(provider.chat(messages=[{"role": "user", "content": "hi"}]))
+    now["value"] = 901.0
+    response2 = asyncio.run(provider.chat(messages=[{"role": "user", "content": "retry"}]))
+
+    assert response1.content == "fallback-ok"
+    assert response2.content == "primary-recovered"
+    assert first.calls == 2
+    assert second.calls == 1
+
+
+def test_rotating_provider_deduplicates_primary_from_fallback_pool():
+    config = Config()
+    config.agents.defaults.model = "openai1/gpt-5.4"
+    config.agents.defaults.models = ["openai-1/gpt-5.4", "openai2/gpt-5.4", "openai2/gpt-5.4"]
+    config.providers.openai_1.api_key = "sk-route-1"
+    config.providers.openai_1.api_base = "https://route-1.example.com/v1"
+    config.providers.openai_2.api_key = "sk-route-2"
+    config.providers.openai_2.api_base = "https://route-2.example.com/v1"
+
+    provider = _make_provider(config)
+
+    assert isinstance(provider, RotatingProvider)
+    assert provider.primary_provider.api_base == "https://route-1.example.com/v1"
+    assert [child.api_base for child in provider.fallback_providers] == ["https://route-2.example.com/v1"]

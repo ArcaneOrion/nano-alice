@@ -1,7 +1,9 @@
 """Configuration schema using Pydantic."""
 
 from pathlib import Path
-from pydantic import BaseModel, Field, ConfigDict
+from typing import ClassVar
+
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 from pydantic_settings import BaseSettings
 
@@ -185,6 +187,7 @@ class AgentDefaults(Base):
     workspace: str = "~/.nano-alice/workspace"
     provider: str = ""  # empty = auto-match from model
     model: str = "anthropic/claude-opus-4-5"
+    models: list[str] = Field(default_factory=list)  # optional fallback pool after `model` fails
     max_tokens: int = 8192
     temperature: float = 0.7
     max_tool_iterations: int = 20
@@ -222,6 +225,9 @@ class ProvidersConfig(Base):
     custom: ProviderConfig = Field(default_factory=ProviderConfig)  # Any OpenAI-compatible endpoint
     anthropic: ProviderConfig = Field(default_factory=ProviderConfig)
     openai: ProviderConfig = Field(default_factory=ProviderConfig)
+    openai_1: ProviderConfig = Field(default_factory=ProviderConfig)
+    openai_2: ProviderConfig = Field(default_factory=ProviderConfig)
+    openai_3: ProviderConfig = Field(default_factory=ProviderConfig)
     openrouter: ProviderConfig = Field(default_factory=ProviderConfig)
     deepseek: ProviderConfig = Field(default_factory=ProviderConfig)
     groq: ProviderConfig = Field(default_factory=ProviderConfig)
@@ -309,6 +315,19 @@ class ToolsConfig(Base):
 class Config(BaseSettings):
     """Root configuration for nano-alice."""
 
+    OPENAI_ROUTE_NAMES: ClassVar[tuple[str, ...]] = ("openai_1", "openai_2", "openai_3")
+    OPENAI_ROUTE_ALIASES: ClassVar[dict[str, str]] = {
+        "openai1": "openai_1",
+        "openai2": "openai_2",
+        "openai3": "openai_3",
+        "openai_1": "openai_1",
+        "openai_2": "openai_2",
+        "openai_3": "openai_3",
+        "openai-1": "openai_1",
+        "openai-2": "openai_2",
+        "openai-3": "openai_3",
+    }
+
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
@@ -321,6 +340,34 @@ class Config(BaseSettings):
         """Get expanded workspace path."""
         return Path(self.agents.defaults.workspace).expanduser()
 
+    @staticmethod
+    def _normalize_provider_key(name: str | None) -> str | None:
+        if not name:
+            return None
+        normalized = name.lower()
+        alias = Config.OPENAI_ROUTE_ALIASES.get(normalized)
+        if alias:
+            return alias
+        return normalized.replace("-", "_")
+
+    def _match_openai_route(
+        self,
+        model: str | None = None,
+        provider_name: str | None = None,
+    ) -> tuple["ProviderConfig | None", str | None]:
+        normalized_name = self._normalize_provider_key(provider_name)
+        if normalized_name in self.OPENAI_ROUTE_NAMES:
+            return getattr(self.providers, normalized_name, None), normalized_name
+
+        resolved_model = model or self.agents.defaults.model
+        if "/" not in resolved_model:
+            return None, None
+
+        model_prefix = self._normalize_provider_key(resolved_model.split("/", 1)[0])
+        if model_prefix in self.OPENAI_ROUTE_NAMES:
+            return getattr(self.providers, model_prefix, None), model_prefix
+        return None, None
+
     def _match_provider(
         self,
         model: str | None = None,
@@ -329,8 +376,12 @@ class Config(BaseSettings):
         """Match provider config and its registry name. Returns (config, spec_name)."""
         from nano_alice.providers.registry import PROVIDERS
 
+        route_provider, route_name = self._match_openai_route(model, provider_name)
+        if route_name:
+            return route_provider, route_name
+
         if provider_name:
-            normalized = provider_name.lower().replace("-", "_")
+            normalized = self._normalize_provider_key(provider_name) or ""
             normalized_compact = normalized.replace("_", "")
             for spec in PROVIDERS:
                 if spec.name != normalized and spec.name.replace("_", "") != normalized_compact:
