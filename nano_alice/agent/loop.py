@@ -29,6 +29,7 @@ from nano_alice.agent.tools.cron import CronTool
 from nano_alice.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from nano_alice.agent.tools.message import MessageTool
 from nano_alice.agent.tools.registry import ToolRegistry
+from nano_alice.heartbeat.service import HEARTBEAT_OK_TOKEN, normalize_heartbeat_response
 from nano_alice.agent.tools.shell import ExecTool
 from nano_alice.agent.tools.spawn import SpawnTool
 from nano_alice.agent.tools.web import WebFetchTool, make_search_tool
@@ -490,8 +491,11 @@ class AgentLoop:
                     sk = msg.metadata.get("_session_key")
                     response = await self._process_message(msg, session_key=sk)
                     if response is not None:
-                        # Suppress HEARTBEAT_OK from being sent to user
-                        if sk == "heartbeat" and "HEARTBEAT_OK" in (response.content or "").upper():
+                        if sk == "heartbeat":
+                            _, normalized = normalize_heartbeat_response(response.content)
+                            response.content = normalized
+
+                        if sk == "heartbeat" and (response.content or "").strip() == HEARTBEAT_OK_TOKEN:
                             logger.info("Heartbeat: OK (no action needed)")
                         else:
                             await self.bus.publish_outbound(response)
@@ -655,6 +659,9 @@ class AgentLoop:
 
         if final_content is None:
             final_content = "I've completed processing but have no response to give."
+
+        if session_key == "heartbeat":
+            _, final_content = normalize_heartbeat_response(final_content)
 
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
         logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)

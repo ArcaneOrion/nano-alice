@@ -1,6 +1,9 @@
 """Heartbeat service - periodic agent wake-up to check for tasks."""
 
 import asyncio
+import json
+import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Coroutine
 
@@ -12,11 +15,89 @@ DEFAULT_HEARTBEAT_INTERVAL_S = 30 * 60
 # The prompt sent to agent during heartbeat
 HEARTBEAT_PROMPT = """Read HEARTBEAT.md in your workspace (if it exists).
 Follow any instructions or tasks listed there.
-Your response will be sent directly to the user's chat — write your results clearly.
-If nothing needs attention, reply with just: HEARTBEAT_OK"""
+Decide whether the result should be pushed to the user's chat.
+
+Return exactly one JSON object and nothing else.
+
+If there is nothing worth pushing, return:
+{"should_push": false, "reason": "brief reason", "content": ""}
+
+If there is something worth pushing, return:
+{"should_push": true, "reason": "brief reason", "content": "message to send to the user"}
+
+Rules:
+- `should_push` must be a boolean.
+- `content` must contain the full message to send when `should_push` is true.
+- `content` must be an empty string when `should_push` is false.
+- Do not output markdown fences, explanations, or any extra text outside the JSON object."""
 
 # Token that indicates "nothing to do"
 HEARTBEAT_OK_TOKEN = "HEARTBEAT_OK"
+
+
+@dataclass(frozen=True)
+class HeartbeatDecision:
+    """Structured decision returned by the heartbeat model."""
+
+    should_push: bool
+    content: str
+    reason: str = ""
+
+
+def parse_heartbeat_decision(response: str | None) -> HeartbeatDecision | None:
+    """Parse the heartbeat model response into a structured decision."""
+    if response is None:
+        return None
+
+    text = response.strip()
+    if not text:
+        return None
+
+    candidate = text
+    fenced_match = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", text, flags=re.DOTALL)
+    if fenced_match:
+        candidate = fenced_match.group(1).strip()
+
+    if not candidate.startswith("{"):
+        return None
+
+    try:
+        data = json.loads(candidate)
+    except json.JSONDecodeError:
+        return None
+
+    if not isinstance(data, dict) or not isinstance(data.get("should_push"), bool):
+        return None
+
+    content = data.get("content", "")
+    reason = data.get("reason", "")
+    if content is None:
+        content = ""
+    if reason is None:
+        reason = ""
+    if not isinstance(content, str) or not isinstance(reason, str):
+        return None
+
+    content = content.strip()
+    reason = reason.strip()
+    should_push = data["should_push"]
+
+    if should_push and not content:
+        return None
+    if not should_push:
+        content = ""
+
+    return HeartbeatDecision(should_push=should_push, content=content, reason=reason)
+
+
+def normalize_heartbeat_response(response: str | None) -> tuple[HeartbeatDecision | None, str]:
+    """Normalize heartbeat response for storage and downstream dispatch."""
+    decision = parse_heartbeat_decision(response)
+    if decision is None:
+        return None, (response or "")
+    if decision.should_push:
+        return decision, decision.content
+    return decision, HEARTBEAT_OK_TOKEN
 
 
 def _is_heartbeat_empty(content: str | None) -> bool:
@@ -121,9 +202,16 @@ class HeartbeatService:
                     HEARTBEAT_PROMPT, self.notify_channel, self.notify_chat_id
                 )
 
-                # Check if agent said "nothing to do"
-                if HEARTBEAT_OK_TOKEN.replace("_", "") in response.upper().replace("_", ""):
-                    logger.info("Heartbeat: OK (no action needed)")
+                decision, _ = normalize_heartbeat_response(response)
+                if decision is not None:
+                    if decision.should_push:
+                        logger.info("Heartbeat: completed task ({})", decision.reason or "push")
+                    else:
+                        logger.info("Heartbeat: OK ({})", decision.reason or "no action needed")
+                elif response.strip():
+                    logger.warning("Heartbeat returned non-structured response; falling back to raw content")
+                elif self.notify_channel and self.notify_chat_id:
+                    logger.info("Heartbeat: queued for {}:{}", self.notify_channel, self.notify_chat_id)
                 else:
                     logger.info("Heartbeat: completed task")
 
