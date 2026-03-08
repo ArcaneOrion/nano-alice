@@ -19,11 +19,19 @@ Memory is **fully automatic** — you do NOT need to manage it yourself.
 | File | Purpose | Auto-managed? |
 |------|---------|---------------|
 | `memory/MEMORY.md` | Long-term facts, preferences, project overview | Yes (subagent) |
-| `memory/HISTORY.md` | Append-only event log (full history) | Yes (subagent) |
+| `memory/HISTORY.md` | Append-only event log for important events and confirmations | Yes (subagent) |
 | `memory/SCRATCH.md` | Per-turn conversation summaries (subagent scratchpad) | Yes (subagent) |
-| `memory/YYYY-MM-DD.md` | Daily logs | Yes (subagent) |
+| `memory/YYYY-MM-DD.md` | Daily logs | No (not in current auto-write path) |
 | `memory/projects.md` | Active project status and todos | Yes (subagent) |
 | `memory/lessons.md` | Lessons learned, mistakes to avoid | Yes (subagent) |
+
+Current auto-management is intentionally conservative:
+- `memory/MEMORY.md` is for stable long-term facts only.
+- `memory/projects.md` is the default home for active project status changes.
+- `memory/lessons.md` is for reusable lessons, not one-off incidents.
+- `memory/HISTORY.md` records important events worth future recall.
+- `memory/SCRATCH.md` is short-term scratch memory.
+- Daily logs are not part of the current automatic write path.
 
 ## When YOU Should Act
 

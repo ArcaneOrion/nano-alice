@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -22,6 +23,7 @@ Memory directory: {memory_dir}
 - **Batch tool calls**: call multiple tools in one round when possible (e.g. read 2 files at once).
 - **SCRATCH.md is append-only**: do NOT read it before appending. Use memory_search to check \
 for duplicates instead.
+- **Stay in scope**: manage only the standard memory files. Do NOT create daily logs or ad-hoc files.
 - **Skip trivial conversations**: greetings, small talk, "1+1=?" → do NOT write anything, \
 just reply with a summary and STOP.
 - **Large files are tail-truncated**: read_file shows the header + the most recent content. \
@@ -37,6 +39,19 @@ Read the conversation. The input has two sections:
 If the new conversation is only greetings/small talk/trivial Q&A, reply "Nothing notable" \
 and STOP (zero tool calls).
 
+Only write memory when at least one of these is true:
+- The user explicitly asked you to remember something.
+- A long-term preference, constraint, or stable fact was added or changed.
+- An active project status, blocker, decision, or next step changed.
+- A reusable lesson or rule was learned.
+- An important event happened that may need to be recalled later.
+
+Skip writing for:
+- greetings / pleasantries / self-introductions
+- one-off factual Q&A with no future value
+- short acknowledgements or polite follow-ups
+- temporary chatter that does not change preferences, projects, or lessons
+
 ### 2. Check for duplicates
 Use memory_search (1-2 short queries, 5-10 words each) to see if the key facts already exist. \
 If they do, skip writing. Do NOT search more than twice.
@@ -44,16 +59,30 @@ If they do, skip writing. Do NOT search more than twice.
 ### 3. Write to the right file
 **MEMORY.md（主文件，≤5KB，每轮全量注入 system prompt）**
 - Core user facts, preferences, capabilities summary, file index table.
-- Only add truly new long-term facts here.
+- Only add truly new long-term facts here. Default to NOT writing this file unless the fact is stable.
+
+**HISTORY.md（关键事件流，append-only）**
+- Important events, confirmations, failures, reversals, or system-triggered outcomes worth time-based recall.
+- Do not write routine chatter here.
 
 **Sub-files（通过 RAG 按需召回）**
 - `memory/schedule.md` — course schedule, class times
 - `memory/projects.md` — active project status and TODOs
 - `memory/lessons.md` — lessons learned, mistakes to avoid
 - `memory/SCRATCH.md` — timestamped conversation summaries (append-only!)
-- Other topic files as needed (create and add to MEMORY.md file index)
+- Do NOT create other topic files in this task.
 
-Rule: frequently needed → MEMORY.md. Detailed/topic-specific → sub-file.
+Routing rules:
+- stable preference / long-term fact → `memory/MEMORY.md`
+- active project progress / blocker / next step / delivery state → `memory/projects.md`
+- reusable lesson / mistake to avoid / operating rule → `memory/lessons.md`
+- important event / confirmation / failure / system event → `memory/HISTORY.md`
+- short-term conversation summary → `memory/SCRATCH.md`
+
+Update rules:
+- For `memory/projects.md`, `memory/lessons.md`, and `memory/MEMORY.md`, prefer updating existing entries over appending duplicates.
+- For `memory/HISTORY.md` and `memory/SCRATCH.md`, append-only is fine.
+- Do NOT write `memory/YYYY-MM-DD.md` in this task.
 
 For SCRATCH.md, use **append_file only**. Format:
 ```
@@ -170,6 +199,17 @@ class MemoryAgent:
     """Background subagent that extracts memory from recent conversation."""
 
     MAX_ITERATIONS = 10
+    _MANAGED_MEMORY_FILES = {
+        "memory/MEMORY.md",
+        "memory/HISTORY.md",
+        "memory/SCRATCH.md",
+        "memory/projects.md",
+        "memory/lessons.md",
+        "memory/schedule.md",
+    }
+    _APPEND_ONLY_FILES = {"memory/HISTORY.md", "memory/SCRATCH.md"}
+    _UPDATE_PREFERRED_FILES = {"memory/MEMORY.md", "memory/projects.md", "memory/lessons.md"}
+    _DAILY_LOG_RE = re.compile(r"^memory/\d{4}-\d{2}-\d{2}\.md$")
 
     def __init__(
         self,
@@ -183,6 +223,7 @@ class MemoryAgent:
         self._model = model
         self._memory_dir = workspace / "memory"
         self._memory_dir.mkdir(parents=True, exist_ok=True)
+        self._allow_scratch_overwrite = False
 
         # Build memory_search index if embeddings available
         self._memory_index = None
@@ -273,6 +314,7 @@ Before writing new information, check if these facts already exist. Update exist
 """
 
         if cleanup_scratch:
+            self._allow_scratch_overwrite = True
             system += (
                 "\n\n## SCRATCH.md Cleanup Task\n"
                 "SCRATCH.md hasn't been cleaned in over 48 hours. After processing new messages:\n"
@@ -289,59 +331,62 @@ Before writing new information, check if these facts already exist. Update exist
             {"role": "user", "content": conversation_text},
         ]
 
-        for iteration in range(self.MAX_ITERATIONS):
-            try:
-                response = await self._provider.chat(
-                    messages=messages,
-                    tools=_TOOLS,
-                    model=self._model,
-                )
-            except Exception as e:
-                logger.error("Memory agent LLM call failed (iter {}): {}", iteration, e)
-                return
+        try:
+            for iteration in range(self.MAX_ITERATIONS):
+                try:
+                    response = await self._provider.chat(
+                        messages=messages,
+                        tools=_TOOLS,
+                        model=self._model,
+                    )
+                except Exception as e:
+                    logger.error("Memory agent LLM call failed (iter {}): {}", iteration, e)
+                    return
 
-            if not response.has_tool_calls:
-                logger.info("Memory agent done after {} iterations", iteration + 1)
-                return
+                if not response.has_tool_calls:
+                    logger.info("Memory agent done after {} iterations", iteration + 1)
+                    return
 
-            # Record assistant message
-            tool_call_dicts = [
-                {
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {
-                        "name": tc.name,
-                        "arguments": json.dumps(tc.arguments, ensure_ascii=False),
-                    },
-                }
-                for tc in response.tool_calls
-            ]
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": response.content,
-                    "tool_calls": tool_call_dicts,
-                }
-            )
-
-            # Execute each tool call
-            for tc in response.tool_calls:
-                logger.info(
-                    "Memory agent tool: {}({})",
-                    tc.name,
-                    json.dumps(tc.arguments, ensure_ascii=False)[:200],
-                )
-                result = await self._execute_tool(tc.name, tc.arguments)
+                # Record assistant message
+                tool_call_dicts = [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.name,
+                            "arguments": json.dumps(tc.arguments, ensure_ascii=False),
+                        },
+                    }
+                    for tc in response.tool_calls
+                ]
                 messages.append(
                     {
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "name": tc.name,
-                        "content": result,
+                        "role": "assistant",
+                        "content": response.content,
+                        "tool_calls": tool_call_dicts,
                     }
                 )
 
-        logger.warning("Memory agent hit max iterations ({})", self.MAX_ITERATIONS)
+                # Execute each tool call
+                for tc in response.tool_calls:
+                    logger.info(
+                        "Memory agent tool: {}({})",
+                        tc.name,
+                        json.dumps(tc.arguments, ensure_ascii=False)[:200],
+                    )
+                    result = await self._execute_tool(tc.name, tc.arguments)
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "name": tc.name,
+                            "content": result,
+                        }
+                    )
+
+            logger.warning("Memory agent hit max iterations ({})", self.MAX_ITERATIONS)
+        finally:
+            self._allow_scratch_overwrite = False
 
     async def _execute_tool(self, name: str, args: dict) -> str:
         """Execute a tool call within the workspace."""
@@ -366,6 +411,36 @@ Before writing new information, check if these facts already exist. Update exist
                 return f"Error: unknown tool '{name}'"
         except Exception as e:
             return f"Error: {e}"
+
+    @staticmethod
+    def _normalize_memory_path(path: str) -> str:
+        return Path(path).as_posix().lstrip("./")
+
+    def _validate_write_operation(self, op: str, path: str) -> str | None:
+        normalized = self._normalize_memory_path(path)
+
+        if self._DAILY_LOG_RE.match(normalized):
+            return "Error: daily log writes are out of scope"
+
+        if normalized.startswith("memory/"):
+            if normalized.endswith(".md") and normalized not in self._MANAGED_MEMORY_FILES:
+                return f"Error: unmanaged memory file '{normalized}'"
+            if normalized not in self._MANAGED_MEMORY_FILES:
+                return f"Error: writes are only allowed for managed memory files, got '{normalized}'"
+
+        if normalized == "memory/SCRATCH.md" and op != "append_file" and not self._allow_scratch_overwrite:
+            return "Error: SCRATCH.md is append-only outside cleanup"
+
+        if normalized in self._APPEND_ONLY_FILES and op == "edit_file":
+            return f"Error: {normalized} is append-only"
+
+        if normalized in self._UPDATE_PREFERRED_FILES and op == "append_file":
+            return f"Error: use edit_file or write_file for {normalized}"
+
+        if normalized.endswith(".md") and not normalized.startswith("memory/"):
+            return f"Error: writes must stay within memory/, got '{normalized}'"
+
+        return None
 
     def _resolve(self, path: str) -> Path:
         """Resolve a path relative to workspace, ensuring it stays within."""
@@ -394,12 +469,16 @@ Before writing new information, check if these facts already exist. Update exist
         )
 
     def _write_file(self, path: str, content: str) -> str:
+        if error := self._validate_write_operation("write_file", path):
+            return error
         fp = self._resolve(path)
         fp.parent.mkdir(parents=True, exist_ok=True)
         fp.write_text(content, encoding="utf-8")
         return f"Written {len(content)} chars to {path}"
 
     def _append_file(self, path: str, content: str) -> str:
+        if error := self._validate_write_operation("append_file", path):
+            return error
         fp = self._resolve(path)
         fp.parent.mkdir(parents=True, exist_ok=True)
         with open(fp, "a", encoding="utf-8") as f:
@@ -407,6 +486,8 @@ Before writing new information, check if these facts already exist. Update exist
         return f"Appended {len(content)} chars to {path}"
 
     def _edit_file(self, path: str, old_string: str, new_string: str) -> str:
+        if error := self._validate_write_operation("edit_file", path):
+            return error
         fp = self._resolve(path)
         if not fp.exists():
             return f"File not found: {path}"

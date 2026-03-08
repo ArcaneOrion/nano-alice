@@ -137,6 +137,13 @@ nano-alice cron remove <job_id>
 | `lessons.md` | 经验教训 |
 | `YYYY-MM-DD.md` | 每日日志 |
 
+当前实现中的记忆子代理采用**保守写入策略**：
+- 自动重点维护 `MEMORY.md`、`HISTORY.md`、`SCRATCH.md`、`projects.md`、`lessons.md`
+- `MEMORY.md` 仅用于长期稳定事实与偏好
+- `projects.md` 优先承载项目状态更新，避免把项目流水写进 `MEMORY.md`
+- `HISTORY.md` 记录关键事件、重要确认、失败与反转
+- `YYYY-MM-DD.md` 当前不在默认自动写入路径内
+
 ## Supported Providers / 支持的 LLM Provider
 
 | Provider | 类型 | 说明 |
