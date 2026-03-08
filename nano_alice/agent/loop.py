@@ -34,7 +34,12 @@ from nano_alice.agent.tools.spawn import SpawnTool
 from nano_alice.agent.tools.web import WebFetchTool, make_search_tool
 from nano_alice.bus.events import InboundMessage, OutboundMessage
 from nano_alice.bus.queue import MessageBus
-from nano_alice.heartbeat.service import HEARTBEAT_OK_TOKEN, normalize_heartbeat_response
+from nano_alice.heartbeat.service import (
+    HEARTBEAT_OK_TOKEN,
+    heartbeat_response_preview,
+    normalize_heartbeat_response,
+    parse_heartbeat_decision,
+)
 from nano_alice.providers.base import LLMProvider, LLMResponse
 from nano_alice.session.manager import Session, SessionManager
 
@@ -751,6 +756,18 @@ class AgentLoop:
             final_content = "I've completed processing but have no response to give."
 
         if session_key == "heartbeat":
+            raw_preview = heartbeat_response_preview(final_content)
+            if raw_preview:
+                logger.info("Heartbeat raw response: {}", raw_preview)
+
+            if decision := parse_heartbeat_decision(final_content):
+                logger.info(
+                    "Heartbeat decision: should_push={}, reason={}, content_preview={}",
+                    decision.should_push,
+                    decision.reason or "-",
+                    heartbeat_response_preview(decision.content),
+                )
+
             _, final_content = normalize_heartbeat_response(final_content)
 
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content

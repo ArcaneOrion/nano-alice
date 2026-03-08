@@ -35,6 +35,17 @@ Rules:
 HEARTBEAT_OK_TOKEN = "HEARTBEAT_OK"
 
 
+def heartbeat_response_preview(response: str | None, limit: int = 200) -> str:
+    """Return a single-line preview of the raw heartbeat response for logging."""
+    if response is None:
+        return ""
+
+    preview = " ".join(response.strip().split())
+    if len(preview) <= limit:
+        return preview
+    return preview[:limit] + "..."
+
+
 @dataclass(frozen=True)
 class HeartbeatDecision:
     """Structured decision returned by the heartbeat model."""

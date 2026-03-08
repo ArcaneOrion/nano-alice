@@ -1,6 +1,7 @@
 from nano_alice.heartbeat.service import (
     HEARTBEAT_OK_TOKEN,
     HeartbeatDecision,
+    heartbeat_response_preview,
     normalize_heartbeat_response,
     parse_heartbeat_decision,
 )
@@ -64,3 +65,15 @@ def test_normalize_heartbeat_response_falls_back_to_raw_text() -> None:
 
     assert decision is None
     assert normalized == raw
+
+
+def test_heartbeat_response_preview_collapses_whitespace() -> None:
+    preview = heartbeat_response_preview('  {\n  "should_push": false,\n  "content": ""\n}  ')
+
+    assert preview == '{ "should_push": false, "content": "" }'
+
+
+def test_heartbeat_response_preview_truncates_long_text() -> None:
+    preview = heartbeat_response_preview("x" * 210, limit=20)
+
+    assert preview == ("x" * 20) + "..."
