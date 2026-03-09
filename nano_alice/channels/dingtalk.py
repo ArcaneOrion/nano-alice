@@ -191,11 +191,11 @@ class DingTalkChannel(BaseChannel):
             logger.error("Failed to get DingTalk access token: {}", e)
             return None
 
-    async def send(self, msg: OutboundMessage) -> None:
+    async def send(self, msg: OutboundMessage):
         """Send a message through DingTalk."""
         token = await self._get_access_token()
         if not token:
-            return
+            return self._failed_receipt(msg, "Failed to get DingTalk access token")
 
         # oToMessages/batchSend: sends to individual users (private chat)
         # https://open.dingtalk.com/document/orgapp/robot-batch-send-messages
@@ -215,16 +215,19 @@ class DingTalkChannel(BaseChannel):
 
         if not self._http:
             logger.warning("DingTalk HTTP client not initialized, cannot send")
-            return
+            return self._failed_receipt(msg, "DingTalk HTTP client not initialized")
 
         try:
             resp = await self._http.post(url, json=data, headers=headers)
             if resp.status_code != 200:
                 logger.error("DingTalk send failed: {}", resp.text)
+                return self._failed_receipt(msg, f"DingTalk send failed: {resp.text[:200]}")
             else:
                 logger.debug("DingTalk message sent to {}", msg.chat_id)
+                return self._success_receipt(msg)
         except Exception as e:
             logger.error("Error sending DingTalk message: {}", e)
+            return self._failed_receipt(msg, str(e))
 
     async def _on_message(self, content: str, sender_id: str, sender_name: str) -> None:
         """Handle incoming message (called by NanoAliceDingTalkHandler).

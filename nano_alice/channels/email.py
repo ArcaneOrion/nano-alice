@@ -102,25 +102,25 @@ class EmailChannel(BaseChannel):
         """Stop polling loop."""
         self._running = False
 
-    async def send(self, msg: OutboundMessage) -> None:
+    async def send(self, msg: OutboundMessage):
         """Send email via SMTP."""
         if not self.config.consent_granted:
             logger.warning("Skip email send: consent_granted is false")
-            return
+            return self._failed_receipt(msg, "consent_granted is false")
 
         force_send = bool((msg.metadata or {}).get("force_send"))
         if not self.config.auto_reply_enabled and not force_send:
             logger.info("Skip automatic email reply: auto_reply_enabled is false")
-            return
+            return self._failed_receipt(msg, "auto_reply_enabled is false")
 
         if not self.config.smtp_host:
             logger.warning("Email channel SMTP host not configured")
-            return
+            return self._failed_receipt(msg, "SMTP host not configured")
 
         to_addr = msg.chat_id.strip()
         if not to_addr:
             logger.warning("Email channel missing recipient address")
-            return
+            return self._failed_receipt(msg, "missing recipient address")
 
         base_subject = self._last_subject_by_chat.get(to_addr, "nano-alice reply")
         subject = self._reply_subject(base_subject)
@@ -146,7 +146,8 @@ class EmailChannel(BaseChannel):
             self._smtp_send(email_msg)
         except Exception as e:
             logger.error("Error sending email to {}: {}", to_addr, e)
-            raise
+            return self._failed_receipt(msg, str(e))
+        return self._success_receipt(msg, provider_message_id=email_msg.get("Message-ID", ""))
 
     def _validate_config(self) -> bool:
         missing = []

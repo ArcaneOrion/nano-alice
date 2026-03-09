@@ -1,6 +1,6 @@
 """Event types for the message bus."""
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any
 
@@ -34,4 +34,22 @@ class OutboundMessage:
     media: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
+
+@dataclass
+class DeliveryReceipt:
+    """Structured delivery result emitted by outbound channels."""
+
+    channel: str
+    chat_id: str
+    status: str
+    provider_message_id: str = ""
+    error: str = ""
+    session_key: str = ""
+    intent_id: str = ""
+    delivered_at: str = field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
+    content_preview: str = ""
+
+    def to_metadata(self) -> dict[str, Any]:
+        """Convert receipt to message metadata for internal system events."""
+        return {"_delivery_receipt": True, "receipt": asdict(self)}
 

@@ -1,11 +1,12 @@
 """Base channel interface for chat platforms."""
 
 from abc import ABC, abstractmethod
+from datetime import datetime
 from typing import Any
 
 from loguru import logger
 
-from nano_alice.bus.events import InboundMessage, OutboundMessage
+from nano_alice.bus.events import DeliveryReceipt, InboundMessage, OutboundMessage
 from nano_alice.bus.queue import MessageBus
 
 
@@ -49,7 +50,7 @@ class BaseChannel(ABC):
         pass
     
     @abstractmethod
-    async def send(self, msg: OutboundMessage) -> None:
+    async def send(self, msg: OutboundMessage) -> DeliveryReceipt:
         """
         Send a message through this channel.
         
@@ -57,6 +58,39 @@ class BaseChannel(ABC):
             msg: The message to send.
         """
         pass
+
+    def _success_receipt(
+        self,
+        msg: OutboundMessage,
+        *,
+        provider_message_id: str = "",
+    ) -> DeliveryReceipt:
+        metadata = msg.metadata or {}
+        session_key = str(metadata.get("_session_key") or f"{msg.channel}:{msg.chat_id}")
+        return DeliveryReceipt(
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            status="sent",
+            provider_message_id=provider_message_id,
+            session_key=session_key,
+            intent_id=str(metadata.get("_intent_id") or ""),
+            delivered_at=datetime.now().isoformat(timespec="seconds"),
+            content_preview=(msg.content or "")[:200],
+        )
+
+    def _failed_receipt(self, msg: OutboundMessage, error: str) -> DeliveryReceipt:
+        metadata = msg.metadata or {}
+        session_key = str(metadata.get("_session_key") or f"{msg.channel}:{msg.chat_id}")
+        return DeliveryReceipt(
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            status="failed",
+            error=error[:500],
+            session_key=session_key,
+            intent_id=str(metadata.get("_intent_id") or ""),
+            delivered_at=datetime.now().isoformat(timespec="seconds"),
+            content_preview=(msg.content or "")[:200],
+        )
     
     def is_allowed(self, sender_id: str) -> bool:
         """

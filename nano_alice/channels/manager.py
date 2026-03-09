@@ -7,7 +7,7 @@ from typing import Any
 
 from loguru import logger
 
-from nano_alice.bus.events import OutboundMessage
+from nano_alice.bus.events import DeliveryReceipt, InboundMessage, OutboundMessage
 from nano_alice.bus.queue import MessageBus
 from nano_alice.channels.base import BaseChannel
 from nano_alice.config.schema import Config
@@ -196,9 +196,27 @@ class ChannelManager:
                 channel = self.channels.get(msg.channel)
                 if channel:
                     try:
-                        await channel.send(msg)
+                        receipt = await channel.send(msg)
                     except Exception as e:
                         logger.error("Error sending to {}: {}", msg.channel, e)
+                        receipt = DeliveryReceipt(
+                            channel=msg.channel,
+                            chat_id=msg.chat_id,
+                            status="failed",
+                            error=str(e),
+                            session_key=str((msg.metadata or {}).get("_session_key") or f"{msg.channel}:{msg.chat_id}"),
+                            intent_id=str((msg.metadata or {}).get("_intent_id") or ""),
+                            content_preview=(msg.content or "")[:200],
+                        )
+                    await self.bus.publish_inbound(
+                        InboundMessage(
+                            channel="system",
+                            sender_id="delivery",
+                            chat_id=receipt.session_key or f"{receipt.channel}:{receipt.chat_id}",
+                            content="",
+                            metadata=receipt.to_metadata(),
+                        )
+                    )
                 else:
                     logger.warning("Unknown channel: {}", msg.channel)
                     

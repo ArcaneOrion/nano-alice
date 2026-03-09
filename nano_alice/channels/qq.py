@@ -96,19 +96,21 @@ class QQChannel(BaseChannel):
                 pass
         logger.info("QQ bot stopped")
 
-    async def send(self, msg: OutboundMessage) -> None:
+    async def send(self, msg: OutboundMessage):
         """Send a message through QQ."""
         if not self._client:
             logger.warning("QQ client not initialized")
-            return
+            return self._failed_receipt(msg, "QQ client not initialized")
         try:
-            await self._client.api.post_c2c_message(
+            response = await self._client.api.post_c2c_message(
                 openid=msg.chat_id,
                 msg_type=0,
                 content=msg.content,
             )
+            return self._success_receipt(msg, provider_message_id=str(getattr(response, "id", "") or ""))
         except Exception as e:
             logger.error("Error sending QQ message: {}", e)
+            return self._failed_receipt(msg, str(e))
 
     async def _on_message(self, data: "C2CMessage") -> None:
         """Handle incoming message from QQ."""

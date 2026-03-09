@@ -1,5 +1,6 @@
 import pytest
 
+from nano_alice.agent.reminder_intent import ReminderIntentStore
 from nano_alice.cron.service import CronService
 from nano_alice.cron.types import CronSchedule
 
@@ -28,3 +29,22 @@ def test_add_job_accepts_valid_timezone(tmp_path) -> None:
 
     assert job.schedule.tz == "America/Vancouver"
     assert job.state.next_run_at_ms is not None
+
+
+def test_add_job_creates_reminder_intent_when_store_configured(tmp_path) -> None:
+    intent_store = ReminderIntentStore(tmp_path / "workspace")
+    service = CronService(tmp_path / "cron" / "jobs.json", intent_store=intent_store)
+
+    job = service.add_job(
+        name="drink water",
+        schedule=CronSchedule(kind="every", every_ms=60000),
+        message="Drink water",
+        channel="feishu",
+        to="chat1",
+    )
+
+    assert job.payload.intent_id
+    intent = intent_store.load(job.payload.intent_id or "")
+    assert intent is not None
+    assert intent.session_key == "feishu:chat1"
+    assert intent.goal == "Drink water"

@@ -466,6 +466,7 @@ def gateway(
     from nano_alice.config.loader import load_config, get_data_dir
     from nano_alice.bus.queue import MessageBus
     from nano_alice.agent.loop import AgentLoop
+    from nano_alice.agent.reminder_intent import ReminderIntentStore
     from nano_alice.channels.manager import ChannelManager
     from nano_alice.session.manager import SessionManager
     from nano_alice.cron.service import CronService
@@ -491,7 +492,7 @@ def gateway(
 
     # Create cron service first (callback set after agent creation)
     cron_store_path = get_data_dir() / "cron" / "jobs.json"
-    cron = CronService(cron_store_path)
+    cron = CronService(cron_store_path, intent_store=ReminderIntentStore(config.workspace_path))
 
     # Create agent with cron service
     agent = AgentLoop(
@@ -517,17 +518,23 @@ def gateway(
 
     # Set cron callback (needs agent)
     async def on_cron_job(job: CronJob) -> None:
-        """将 cron 任务作为消息注入 MessageBus。"""
+        """将 cron 任务作为内部提醒事件注入 MessageBus。"""
         from nano_alice.bus.events import InboundMessage
         channel = job.payload.channel or "cli"
         chat_id = job.payload.to or "direct"
-        content = f"[定时任务: {job.name}] {job.payload.message}"
         await bus.publish_inbound(InboundMessage(
-            channel=channel,
+            channel="system",
             sender_id="cron",
-            chat_id=chat_id,
-            content=content,
-            metadata={"_cron_job_id": job.id},
+            chat_id=f"{channel}:{chat_id}",
+            content="",
+            metadata={
+                "_cron_intent_due": True,
+                "_cron_job_id": job.id,
+                "_intent_id": job.payload.intent_id,
+                "_session_key": f"{channel}:{chat_id}",
+                "_origin_channel": channel,
+                "_origin_chat_id": chat_id,
+            },
         ))
     cron.on_job = on_cron_job
     

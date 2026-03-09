@@ -295,23 +295,23 @@ class MochatChannel(BaseChannel):
             self._http = None
         self._ws_connected = self._ws_ready = False
 
-    async def send(self, msg: OutboundMessage) -> None:
+    async def send(self, msg: OutboundMessage):
         """Send outbound message to session or panel."""
         if not self.config.claw_token:
             logger.warning("Mochat claw_token missing, skip send")
-            return
+            return self._failed_receipt(msg, "Mochat claw_token missing")
 
         parts = ([msg.content.strip()] if msg.content and msg.content.strip() else [])
         if msg.media:
             parts.extend(m for m in msg.media if isinstance(m, str) and m.strip())
         content = "\n".join(parts).strip()
         if not content:
-            return
+            return self._success_receipt(msg)
 
         target = resolve_mochat_target(msg.chat_id)
         if not target.id:
             logger.warning("Mochat outbound target is empty")
-            return
+            return self._failed_receipt(msg, "Mochat outbound target is empty")
 
         is_panel = (target.is_panel or target.id in self._panel_set) and not target.id.startswith("session_")
         try:
@@ -321,8 +321,10 @@ class MochatChannel(BaseChannel):
             else:
                 await self._api_send("/api/claw/sessions/send", "sessionId", target.id,
                                      content, msg.reply_to)
+            return self._success_receipt(msg)
         except Exception as e:
             logger.error("Failed to send Mochat message: {}", e)
+            return self._failed_receipt(msg, str(e))
 
     # ---- config / init helpers ---------------------------------------------
 

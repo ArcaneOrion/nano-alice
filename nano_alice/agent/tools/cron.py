@@ -128,6 +128,8 @@ class CronTool(Tool):
             channel=self._channel,
             to=self._chat_id,
             delete_after_run=delete_after,
+            intent_goal=message,
+            why_notify="Internal reminder scheduled by the agent for this conversation.",
         )
         return f"Created job '{job.name}' (id: {job.id})"
 

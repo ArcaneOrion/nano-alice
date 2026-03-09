@@ -10,6 +10,7 @@ from typing import Any, Callable, Coroutine
 
 from loguru import logger
 
+from nano_alice.agent.reminder_intent import ReminderIntentStore
 from nano_alice.cron.types import CronJob, CronJobState, CronPayload, CronSchedule, CronStore
 
 
@@ -65,10 +66,12 @@ class CronService:
     def __init__(
         self,
         store_path: Path,
-        on_job: Callable[[CronJob], Coroutine[Any, Any, None]] | None = None
+        on_job: Callable[[CronJob], Coroutine[Any, Any, None]] | None = None,
+        intent_store: ReminderIntentStore | None = None,
     ):
         self.store_path = store_path
         self.on_job = on_job  # Callback to execute job, returns response text
+        self.intent_store = intent_store
         self._store: CronStore | None = None
         self._timer_task: asyncio.Task | None = None
         self._running = False
@@ -97,6 +100,7 @@ class CronService:
                         payload=CronPayload(
                             kind=j["payload"].get("kind", "agent_turn"),
                             message=j["payload"].get("message", ""),
+                            intent_id=j["payload"].get("intentId"),
                             channel=j["payload"].get("channel"),
                             to=j["payload"].get("to"),
                         ),
@@ -110,12 +114,33 @@ class CronService:
                         updated_at_ms=j.get("updatedAtMs", 0),
                         delete_after_run=j.get("deleteAfterRun", False),
                     ))
-                self._store = CronStore(jobs=jobs)
+                self._store = CronStore(version=data.get("version", 1), jobs=jobs)
             except Exception as e:
                 logger.warning("Failed to load cron store: {}", e)
                 self._store = CronStore()
         else:
             self._store = CronStore()
+
+        if self.intent_store and self._store:
+            changed = False
+            for job in self._store.jobs:
+                if job.payload.intent_id:
+                    continue
+                channel = job.payload.channel or "cli"
+                chat_id = job.payload.to or "direct"
+                intent = self.intent_store.create(
+                    session_key=f"{channel}:{chat_id}",
+                    origin_channel=channel,
+                    origin_chat_id=chat_id,
+                    goal=job.payload.message or job.name,
+                    why_notify="Migrated scheduled reminder intent",
+                )
+                job.payload.intent_id = intent.intent_id
+                job.payload.kind = "system_event"
+                changed = True
+            if changed:
+                self._store.version = max(self._store.version, 2)
+                self._save_store()
         
         return self._store
     
@@ -143,6 +168,7 @@ class CronService:
                     "payload": {
                         "kind": j.payload.kind,
                         "message": j.payload.message,
+                        "intentId": j.payload.intent_id,
                         "channel": j.payload.channel,
                         "to": j.payload.to,
                     },
@@ -279,11 +305,27 @@ class CronService:
         channel: str | None = None,
         to: str | None = None,
         delete_after_run: bool = False,
+        intent_goal: str | None = None,
+        why_notify: str | None = None,
+        notify_policy: dict[str, Any] | None = None,
     ) -> CronJob:
         """Add a new job."""
         store = self._load_store()
         _validate_schedule_for_add(schedule)
         now = _now_ms()
+        intent_id = None
+        if self.intent_store:
+            origin_channel = channel or "cli"
+            origin_chat_id = to or "direct"
+            intent = self.intent_store.create(
+                session_key=f"{origin_channel}:{origin_chat_id}",
+                origin_channel=origin_channel,
+                origin_chat_id=origin_chat_id,
+                goal=(intent_goal or message or name).strip(),
+                why_notify=(why_notify or "Scheduled reminder created from conversation").strip(),
+                notify_policy=notify_policy,
+            )
+            intent_id = intent.intent_id
 
         job = CronJob(
             id=str(uuid.uuid4())[:8],
@@ -291,8 +333,9 @@ class CronService:
             enabled=True,
             schedule=schedule,
             payload=CronPayload(
-                kind="agent_turn",
+                kind="system_event",
                 message=message,
+                intent_id=intent_id,
                 channel=channel,
                 to=to,
             ),

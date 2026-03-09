@@ -73,11 +73,12 @@ class SlackChannel(BaseChannel):
                 logger.warning("Slack socket close failed: {}", e)
             self._socket_client = None
 
-    async def send(self, msg: OutboundMessage) -> None:
+    async def send(self, msg: OutboundMessage):
         """Send a message through Slack."""
         if not self._web_client:
             logger.warning("Slack client not running")
-            return
+            return self._failed_receipt(msg, "Slack client not running")
+        last_message_id = ""
         try:
             slack_meta = msg.metadata.get("slack", {}) if msg.metadata else {}
             thread_ts = slack_meta.get("thread_ts")
@@ -87,11 +88,12 @@ class SlackChannel(BaseChannel):
             thread_ts_param = thread_ts if use_thread else None
 
             if msg.content:
-                await self._web_client.chat_postMessage(
+                resp = await self._web_client.chat_postMessage(
                     channel=msg.chat_id,
                     text=self._to_mrkdwn(msg.content),
                     thread_ts=thread_ts_param,
                 )
+                last_message_id = str((resp.data or {}).get("ts", "") or last_message_id)
 
             for media_path in msg.media or []:
                 try:
@@ -102,8 +104,10 @@ class SlackChannel(BaseChannel):
                     )
                 except Exception as e:
                     logger.error("Failed to upload file {}: {}", media_path, e)
+            return self._success_receipt(msg, provider_message_id=last_message_id)
         except Exception as e:
             logger.error("Error sending Slack message: {}", e)
+            return self._failed_receipt(msg, str(e))
 
     async def _on_socket_request(
         self,
@@ -247,4 +251,3 @@ class SlackChannel(BaseChannel):
             if parts:
                 rows.append(" · ".join(parts))
         return "\n".join(rows)
-

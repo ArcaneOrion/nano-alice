@@ -14,6 +14,7 @@ from loguru import logger
 
 from nano_alice.agent.context import ContextBuilder
 from nano_alice.agent.memory import MemoryStore
+from nano_alice.agent.reminder_intent import ReminderIntent, ReminderIntentStore
 from nano_alice.agent.subagent import SubagentManager
 from nano_alice.agent.task_state import (
     TaskRouteDecision,
@@ -32,7 +33,7 @@ from nano_alice.agent.tools.registry import ToolRegistry
 from nano_alice.agent.tools.shell import ExecTool
 from nano_alice.agent.tools.spawn import SpawnTool
 from nano_alice.agent.tools.web import WebFetchTool, make_search_tool
-from nano_alice.bus.events import InboundMessage, OutboundMessage
+from nano_alice.bus.events import DeliveryReceipt, InboundMessage, OutboundMessage
 from nano_alice.bus.queue import MessageBus
 from nano_alice.heartbeat.service import (
     HEARTBEAT_OK_TOKEN,
@@ -129,6 +130,7 @@ class AgentLoop:
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
         self.task_states = TaskStateStore(workspace)
+        self.reminder_intents = ReminderIntentStore(workspace)
         self.task_router = TaskRouter()
         self.task_renderer = TaskStateRenderer()
         self.tools = ToolRegistry()
@@ -259,6 +261,60 @@ class AgentLoop:
         if cron_tool := self.tools.get("cron"):
             if isinstance(cron_tool, CronTool):
                 cron_tool.set_context(channel, chat_id)
+
+    @staticmethod
+    def _parse_origin_chat(chat_id: str) -> tuple[str, str]:
+        if ":" in chat_id:
+            return chat_id.split(":", 1)
+        return "cli", chat_id
+
+    def _build_intent_due_message(self, intent: ReminderIntent) -> str:
+        notify_policy = json.dumps(intent.notify_policy, ensure_ascii=False)
+        last_delivery = json.dumps(intent.delivery_state.__dict__, ensure_ascii=False)
+        return (
+            "[Internal Reminder Intent Due]\n"
+            "This is your own internal reminder intent becoming due. "
+            "It is not a new user message.\n\n"
+            f"Intent ID: {intent.intent_id}\n"
+            f"Origin Session: {intent.session_key}\n"
+            f"Goal: {intent.goal}\n"
+            f"Why Notify: {intent.why_notify}\n"
+            f"Notify Policy: {notify_policy}\n"
+            f"Last Delivery State: {last_delivery}\n\n"
+            "Decide whether to notify the user now. "
+            "If yes, write the exact user-facing message. "
+            "If no, return an empty response."
+        )
+
+    def _record_delivery_receipt(self, receipt: DeliveryReceipt) -> None:
+        if receipt.intent_id:
+            status = receipt.status if receipt.status in {"pending", "sent", "failed", "skipped"} else "failed"
+            error = receipt.error
+            if status == "failed" and receipt.status not in {"failed", "pending", "sent", "skipped"}:
+                error = error or f"unknown receipt status: {receipt.status}"
+            self.reminder_intents.update_delivery(
+                receipt.intent_id,
+                status=status,
+                message_id=receipt.provider_message_id,
+                error=error,
+                delivered_at=receipt.delivered_at,
+            )
+
+        if not receipt.session_key:
+            return
+
+        session = self.sessions.get_or_create(receipt.session_key)
+        session.metadata["last_delivery_receipt"] = {
+            "channel": receipt.channel,
+            "chat_id": receipt.chat_id,
+            "status": receipt.status,
+            "provider_message_id": receipt.provider_message_id,
+            "error": receipt.error,
+            "intent_id": receipt.intent_id,
+            "delivered_at": receipt.delivered_at,
+            "content_preview": receipt.content_preview,
+        }
+        self.sessions.save(session)
 
     @staticmethod
     def _strip_think(text: str | None) -> str | None:
@@ -841,10 +897,74 @@ class AgentLoop:
         )
         silent_internal = bool(msg.metadata.get("_silent"))
 
-        if internal_task_event:
-            channel, chat_id = (
-                msg.chat_id.split(":", 1) if ":" in msg.chat_id else ("cli", msg.chat_id)
+        if msg.channel == "system" and msg.metadata.get("_delivery_receipt"):
+            receipt_data = msg.metadata.get("receipt") or {}
+            try:
+                receipt = DeliveryReceipt(**receipt_data)
+            except TypeError:
+                logger.warning("Ignoring malformed delivery receipt: {}", receipt_data)
+                return None
+            self._record_delivery_receipt(receipt)
+            logger.info(
+                "Processed delivery receipt: channel={} chat_id={} status={} intent_id={}",
+                receipt.channel,
+                receipt.chat_id,
+                receipt.status,
+                receipt.intent_id or "-",
             )
+            return None
+
+        if msg.channel == "system" and msg.metadata.get("_cron_intent_due"):
+            origin_channel, origin_chat_id = self._parse_origin_chat(msg.chat_id)
+            intent_id = str(msg.metadata.get("_intent_id") or "")
+            intent = self.reminder_intents.load(intent_id)
+            if intent is None:
+                logger.warning("Ignoring due intent event without stored intent: {}", intent_id or "-")
+                return None
+
+            key = session_key or msg.metadata.get("_session_key") or intent.session_key
+            session = self.sessions.get_or_create(key)
+            self._set_tool_context(origin_channel, origin_chat_id, msg.metadata.get("message_id"))
+
+            envelope = self.context.build_prompt_envelope(
+                history=session.get_history(max_messages=self.memory_window),
+                current_message=self._build_intent_due_message(intent),
+                channel=origin_channel,
+                chat_id=origin_chat_id,
+                task_rules_xml=self.task_renderer.render_task_rules_xml(),
+            )
+            messages = self.context.render_messages(envelope)
+            try:
+                final_content, _, token_usage, _, _ = await self._run_agent_loop(messages)
+            except Exception as e:
+                logger.error("Failed to process due reminder intent {}: {}", intent.intent_id, e)
+                self.reminder_intents.update_delivery(
+                    intent.intent_id,
+                    status="failed",
+                    error=str(e)[:500],
+                )
+                return None
+            final_content = (final_content or "").strip()
+            self.reminder_intents.mark_notified(intent.intent_id)
+            if not final_content:
+                self.reminder_intents.update_delivery(intent.intent_id, status="skipped")
+                return None
+
+            metadata = {
+                "_intent_id": intent.intent_id,
+                "_session_key": key,
+            }
+            if token_usage and any(v > 0 for v in token_usage.values()):
+                metadata["token_usage"] = token_usage
+            return OutboundMessage(
+                channel=origin_channel,
+                chat_id=origin_chat_id,
+                content=final_content,
+                metadata=metadata,
+            )
+
+        if internal_task_event:
+            channel, chat_id = self._parse_origin_chat(msg.chat_id)
             msg = InboundMessage(
                 channel=channel,
                 sender_id=msg.sender_id,
@@ -858,9 +978,7 @@ class AgentLoop:
 
         # System messages: parse origin from chat_id ("channel:chat_id")
         if msg.channel == "system":
-            channel, chat_id = (
-                msg.chat_id.split(":", 1) if ":" in msg.chat_id else ("cli", msg.chat_id)
-            )
+            channel, chat_id = self._parse_origin_chat(msg.chat_id)
             logger.info("Processing system message from {}", msg.sender_id)
             key = f"{channel}:{chat_id}"
             session = self.sessions.get_or_create(key)

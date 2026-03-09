@@ -21,8 +21,9 @@ class CronSchedule:
 @dataclass
 class CronPayload:
     """What to do when the job runs."""
-    kind: Literal["system_event", "agent_turn"] = "agent_turn"
+    kind: Literal["system_event", "agent_turn"] = "system_event"
     message: str = ""
+    intent_id: str | None = None
     channel: str | None = None  # e.g. "whatsapp"
     to: str | None = None  # e.g. phone number
 

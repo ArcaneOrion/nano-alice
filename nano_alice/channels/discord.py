@@ -95,19 +95,20 @@ class DiscordChannel(BaseChannel):
             await self._http.aclose()
             self._http = None
 
-    async def send(self, msg: OutboundMessage) -> None:
+    async def send(self, msg: OutboundMessage):
         """Send a message through Discord REST API."""
         if not self._http:
             logger.warning("Discord HTTP client not initialized")
-            return
+            return self._failed_receipt(msg, "Discord HTTP client not initialized")
 
         url = f"{DISCORD_API_BASE}/channels/{msg.chat_id}/messages"
         headers = {"Authorization": f"Bot {self.config.token}"}
+        last_message_id = ""
 
         try:
             chunks = _split_message(msg.content or "")
             if not chunks:
-                return
+                return self._success_receipt(msg)
 
             for i, chunk in enumerate(chunks):
                 payload: dict[str, Any] = {"content": chunk}
@@ -117,15 +118,22 @@ class DiscordChannel(BaseChannel):
                     payload["message_reference"] = {"message_id": msg.reply_to}
                     payload["allowed_mentions"] = {"replied_user": False}
 
-                if not await self._send_payload(url, headers, payload):
-                    break  # Abort remaining chunks on failure
+                response = await self._send_payload(url, headers, payload)
+                if response is None:
+                    return self._failed_receipt(msg, "Discord API send failed")
+                try:
+                    data = response.json()
+                except Exception:
+                    data = {}
+                last_message_id = str(data.get("id", "") or last_message_id)
         finally:
             await self._stop_typing(msg.chat_id)
+        return self._success_receipt(msg, provider_message_id=last_message_id)
 
     async def _send_payload(
         self, url: str, headers: dict[str, str], payload: dict[str, Any]
-    ) -> bool:
-        """Send a single Discord API payload with retry on rate-limit. Returns True on success."""
+    ) -> httpx.Response | None:
+        """Send a single Discord API payload with retry on rate-limit."""
         for attempt in range(3):
             try:
                 response = await self._http.post(url, headers=headers, json=payload)
@@ -136,13 +144,13 @@ class DiscordChannel(BaseChannel):
                     await asyncio.sleep(retry_after)
                     continue
                 response.raise_for_status()
-                return True
+                return response
             except Exception as e:
                 if attempt == 2:
                     logger.error("Error sending Discord message: {}", e)
                 else:
                     await asyncio.sleep(1)
-        return False
+        return None
 
     async def _gateway_loop(self) -> None:
         """Main gateway loop: identify, heartbeat, dispatch events."""
