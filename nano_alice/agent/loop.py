@@ -284,6 +284,199 @@ class AgentLoop:
             return msg.content.strip() or active_task.goal
         return msg.content.strip()
 
+    @staticmethod
+    def _get_current_step(task_state: TaskState | None):
+        if task_state is None:
+            return None
+        return next(
+            (step for step in task_state.steps if step.index == task_state.current_step_index),
+            None,
+        )
+
+    @staticmethod
+    def _get_next_step(task_state: TaskState, current_index: int):
+        return next((step for step in task_state.steps if step.index == current_index + 1), None)
+
+    def _mark_step_waiting_subagent(
+        self,
+        task_state: TaskState | None,
+        spawn_task_id: str,
+        note: str,
+    ) -> TaskState | None:
+        current = self._get_current_step(task_state)
+        if task_state is None or current is None:
+            return task_state
+        current.status = "waiting"
+        current.executor = "subagent"
+        current.spawn_task_id = spawn_task_id
+        current.notes = note[:500]
+        if note:
+            current.evidence.append(f"spawn:{spawn_task_id}")
+        task_state.phase = "waiting_subagent"
+        task_state.waiting_reason = f"waiting for subagent {spawn_task_id}"
+        task_state.last_action = f"delegated step {current.index}: {current.title}"
+        task_state.last_event = "step_waiting_subagent"
+        task_state.continuation_scheduled = False
+        if spawn_task_id not in task_state.pending_subagent_ids:
+            task_state.pending_subagent_ids.append(spawn_task_id)
+        sync_task_pointers(task_state)
+        self.task_states.save_active(task_state)
+        return task_state
+
+    def _mark_task_blocked(self, task_state: TaskState | None, reason: str) -> TaskState | None:
+        if task_state is None:
+            return None
+        current = self._get_current_step(task_state)
+        if current is not None and current.status not in {"done", "failed"}:
+            current.status = "blocked"
+            current.notes = reason[:500]
+        task_state.phase = "blocked"
+        task_state.waiting_reason = reason[:500]
+        task_state.last_event = "task_blocked"
+        task_state.continuation_scheduled = False
+        sync_task_pointers(task_state)
+        self.task_states.save_active(task_state)
+        return task_state
+
+    def _resume_waiting_step_from_subagent(
+        self,
+        task_state: TaskState | None,
+        spawn_task_id: str,
+        result_text: str,
+        status: str,
+    ) -> tuple[TaskState | None, str | None]:
+        if task_state is None:
+            return None, None
+        current = next(
+            (
+                step
+                for step in task_state.steps
+                if step.status == "waiting" and step.spawn_task_id == spawn_task_id
+            ),
+            None,
+        )
+        if current is None:
+            logger.info(
+                "Ignoring stale subagent result: task_id={} spawn_task_id={}",
+                task_state.task_id,
+                spawn_task_id,
+            )
+            return None, None
+        if spawn_task_id in task_state.pending_subagent_ids:
+            task_state.pending_subagent_ids.remove(spawn_task_id)
+        task_state.waiting_reason = ""
+        task_state.continuation_scheduled = False
+        if status == "error":
+            task_state.failure_count += 1
+            current.status = "failed"
+            current.notes = result_text[:500]
+            current.evidence.append(f"subagent_error:{spawn_task_id}")
+            task_state.last_event = "subagent_failed"
+            self._mark_task_blocked(task_state, f"Subagent {spawn_task_id} failed: {result_text[:200]}")
+            return task_state, f"任务已暂停：后台步骤失败。{result_text[:200]}"
+        current.status = "in_progress"
+        current.notes = result_text[:500]
+        current.evidence.append(f"subagent_result:{spawn_task_id}")
+        task_state.phase = "executing"
+        task_state.last_action = f"received subagent result for step {current.index}: {current.title}"
+        task_state.last_event = "subagent_result_received"
+        sync_task_pointers(task_state)
+        self.task_states.save_active(task_state)
+        return task_state, None
+
+    def _maybe_extract_spawn_result(self, tool_events: list[dict[str, Any]]) -> dict[str, str] | None:
+        for event in reversed(tool_events):
+            if event.get("name") != "spawn":
+                continue
+            raw_result = event.get("result")
+            structured = raw_result if isinstance(raw_result, dict) else None
+            if structured is None and isinstance(raw_result, str):
+                try:
+                    parsed = json.loads(raw_result)
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    parsed = None
+                if isinstance(parsed, dict):
+                    structured = parsed
+            if structured is not None:
+                spawn_task_id = str(structured.get("spawn_task_id") or structured.get("id") or "").strip()
+                if spawn_task_id:
+                    message = str(structured.get("message") or raw_result or "")
+                    return {
+                        "spawn_task_id": spawn_task_id,
+                        "result": message,
+                    }
+            result = str(raw_result or "")
+            match = re.search(r"id:\s*([A-Za-z0-9_-]+)", result)
+            if not match:
+                logger.debug(
+                    "Spawn result missing task id: preview={}",
+                    result[:200] if result else "-",
+                )
+                continue
+            return {
+                "spawn_task_id": match.group(1),
+                "result": result,
+            }
+        return None
+
+    def _should_auto_continue(self, task_state: TaskState | None) -> tuple[bool, str]:
+        if task_state is None:
+            return False, "no_task"
+        if task_state.phase != "executing":
+            return False, f"phase={task_state.phase}"
+        if task_state.status != "active":
+            return False, f"status={task_state.status}"
+        if task_state.continuation_scheduled:
+            return False, "already_scheduled"
+        if task_state.auto_run_count >= task_state.max_auto_runs:
+            self._mark_task_blocked(task_state, "达到自动续跑上限，等待用户确认。")
+            return False, "auto_run_budget_exhausted"
+        if task_state.failure_count >= task_state.max_failures:
+            self._mark_task_blocked(task_state, "连续失败次数过多，等待用户确认。")
+            return False, "failure_budget_exhausted"
+        current = self._get_current_step(task_state)
+        if current is None or current.status != "in_progress":
+            return False, "no_active_step"
+        return True, "ok"
+
+    async def _publish_task_continuation(
+        self,
+        task_state: TaskState | None,
+        *,
+        channel: str,
+        chat_id: str,
+        session_key: str,
+        reason: str,
+    ) -> bool:
+        allowed, decision = self._should_auto_continue(task_state)
+        if not allowed or task_state is None:
+            logger.info(
+                "Continuation skipped: task_id={} reason={}",
+                task_state.task_id if task_state else "-",
+                decision,
+            )
+            return False
+        task_state.continuation_scheduled = True
+        task_state.auto_run_count += 1
+        task_state.last_event = f"continuation_scheduled:{reason}"
+        self.task_states.save_active(task_state)
+        await self.bus.publish_inbound(
+            InboundMessage(
+                channel="system",
+                sender_id="self",
+                chat_id=f"{channel}:{chat_id}",
+                content="Continue active task using current task_state. Execute only the current allowed step.",
+                metadata={
+                    "_session_key": session_key,
+                    "_task_continue": True,
+                    "_task_id": task_state.task_id,
+                    "_silent": True,
+                },
+            )
+        )
+        logger.info("Continuation scheduled: task_id={} reason={}", task_state.task_id, reason)
+        return True
+
     async def _plan_task(
         self, session: Session, msg: InboundMessage, task_state: TaskState
     ) -> TaskState:
@@ -322,6 +515,9 @@ class AgentLoop:
             except Exception:
                 pass
         task_state.phase = "executing"
+        task_state.waiting_reason = ""
+        task_state.continuation_scheduled = False
+        task_state.last_event = "task_planned"
         sync_task_pointers(task_state)
         self.task_states.save_active(task_state)
         return task_state
@@ -341,13 +537,16 @@ class AgentLoop:
                 goal=self._build_task_goal(msg, active_task),
                 summary=msg.content,
             )
+            task_state.last_event = "task_created"
             self.task_states.save_active(task_state)
             return task_state
         if route.needs_replan:
             active_task.goal = msg.content.strip() or active_task.goal
             active_task.phase = "replanning"
             active_task.plan_version += 1
+            active_task.continuation_scheduled = False
             active_task.last_action = "user requested replanning"
+            active_task.last_event = "task_replanned"
             self.task_states.save_active(active_task)
         return active_task
 
@@ -359,9 +558,7 @@ class AgentLoop:
     ) -> TaskState | None:
         if task_state is None or task_state.phase != "executing":
             return task_state
-        current = next(
-            (step for step in task_state.steps if step.index == task_state.current_step_index), None
-        )
+        current = self._get_current_step(task_state)
         if current is None:
             return task_state
         result_text = (final_content or "").strip()
@@ -370,10 +567,12 @@ class AgentLoop:
         current.result = result_text[:500]
         current.evidence.extend(tool_evidence)
         current.status = "done"
+        current.spawn_task_id = ""
         task_state.last_action = f"completed step {current.index}: {current.title}"
-        next_step = next(
-            (step for step in task_state.steps if step.index == current.index + 1), None
-        )
+        task_state.last_event = "step_completed"
+        task_state.waiting_reason = ""
+        task_state.continuation_scheduled = False
+        next_step = self._get_next_step(task_state, current.index)
         if next_step is None:
             task_state.phase = "completed"
             task_state.status = "done"
@@ -385,6 +584,7 @@ class AgentLoop:
             return None
         next_step.status = "in_progress"
         task_state.phase = "executing"
+        task_state.last_event = "step_advanced"
         sync_task_pointers(task_state)
         self.task_states.save_active(task_state)
         return task_state
@@ -464,13 +664,14 @@ class AgentLoop:
         self,
         initial_messages: list[dict],
         on_progress: Callable[[str], Awaitable[None]] | None = None,
-    ) -> tuple[str | None, list[str], dict[str, int], list[str]]:
-        """Run the agent iteration loop. Returns (final_content, tools_used, token_usage, evidence)."""
+    ) -> tuple[str | None, list[str], dict[str, int], list[str], list[dict[str, Any]]]:
+        """Run the agent iteration loop. Returns final content, tool names, usage, evidence, tool events."""
         messages = initial_messages
         iteration = 0
         final_content = None
         tools_used: list[str] = []
         evidence: list[str] = []
+        tool_events: list[dict[str, Any]] = []
         total_usage: dict[str, int] = {
             "prompt_tokens": 0,
             "completion_tokens": 0,
@@ -531,6 +732,13 @@ class AgentLoop:
                         if isinstance(result, str)
                         else json.dumps(result, ensure_ascii=False)
                     )
+                    tool_events.append(
+                        {
+                            "name": tool_call.name,
+                            "arguments": tool_call.arguments,
+                            "result": result_preview,
+                        }
+                    )
                     evidence.append(f"tool:{tool_call.name}")
                     evidence.append(f"result:{result_preview[:120]}")
                     messages = self.context.add_tool_result(
@@ -553,7 +761,7 @@ class AgentLoop:
             total_usage["completion_tokens"],
             total_usage["total_tokens"],
         )
-        return final_content, tools_used, total_usage, evidence
+        return final_content, tools_used, total_usage, evidence, tool_events
 
     async def run(self) -> None:
         """Run the agent loop, processing messages from the bus."""
@@ -628,6 +836,26 @@ class AgentLoop:
         on_progress: Callable[[str], Awaitable[None]] | None = None,
     ) -> OutboundMessage | None:
         """Process a single inbound message and return the response."""
+        internal_task_event = msg.channel == "system" and (
+            msg.metadata.get("_task_continue") or msg.metadata.get("_subagent_result")
+        )
+        silent_internal = bool(msg.metadata.get("_silent"))
+
+        if internal_task_event:
+            channel, chat_id = (
+                msg.chat_id.split(":", 1) if ":" in msg.chat_id else ("cli", msg.chat_id)
+            )
+            msg = InboundMessage(
+                channel=channel,
+                sender_id=msg.sender_id,
+                chat_id=chat_id,
+                content=msg.content,
+                timestamp=msg.timestamp,
+                media=msg.media,
+                metadata=dict(msg.metadata or {}),
+            )
+            session_key = session_key or msg.metadata.get("_session_key") or msg.session_key
+
         # System messages: parse origin from chat_id ("channel:chat_id")
         if msg.channel == "system":
             channel, chat_id = (
@@ -645,7 +873,7 @@ class AgentLoop:
                 task_rules_xml=self.task_renderer.render_task_rules_xml(),
             )
             messages = self.context.render_messages(envelope)
-            final_content, _, _, _ = await self._run_agent_loop(messages)
+            final_content, _, _, _, _ = await self._run_agent_loop(messages)
             session.add_message("user", f"[System: {msg.sender_id}] {msg.content}")
             session.add_message("assistant", final_content or "Background task completed.")
             self.sessions.save(session)
@@ -717,10 +945,42 @@ class AgentLoop:
                 message_tool.start_turn()
 
         active_task = self.task_states.load_active(session.key)
+        if internal_task_event and active_task is None:
+            logger.info("Ignoring internal task event without active task: {}", msg.sender_id)
+            return None
+        if msg.metadata.get("_task_continue") and active_task is not None:
+            continuation_task_id = str(msg.metadata.get("_task_id") or "")
+            if not continuation_task_id or continuation_task_id != active_task.task_id:
+                logger.info(
+                    "Ignoring stale continuation: expected_task_id={} active_task_id={}",
+                    continuation_task_id or "-",
+                    active_task.task_id,
+                )
+                return None
+            active_task.continuation_scheduled = False
+            active_task.last_event = "continuation_resumed"
+            self.task_states.save_active(active_task)
+        forced_response: str | None = None
+        if msg.metadata.get("_subagent_result"):
+            active_task, forced_response = self._resume_waiting_step_from_subagent(
+                active_task,
+                str(msg.metadata.get("_subagent_task_id") or ""),
+                msg.content,
+                str(msg.metadata.get("_subagent_status") or "ok"),
+            )
+            if active_task is None and forced_response is None:
+                return None
         route = self.task_router.decide(msg.content, active_task=active_task)
         task_state = self._maybe_start_task(session.key, msg, active_task, route)
         if task_state and task_state.phase in {"planning", "replanning"}:
             task_state = await self._plan_task(session, msg, task_state)
+        if forced_response and task_state is not None and task_state.phase == "blocked":
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=forced_response,
+                metadata={"mode": "task", "task_phase": task_state.phase},
+            )
 
         task_rules_xml = self.task_renderer.render_task_rules_xml()
         task_state_xml = self.task_renderer.render_task_state_xml(task_state)
@@ -771,9 +1031,10 @@ class AgentLoop:
                 )
             )
 
-        final_content, tools_used, token_usage, task_evidence = await self._run_agent_loop(
+        effective_progress = None if silent_internal else (on_progress or _bus_progress)
+        final_content, tools_used, token_usage, task_evidence, tool_events = await self._run_agent_loop(
             initial_messages,
-            on_progress=on_progress or _bus_progress,
+            on_progress=effective_progress,
         )
 
         if final_content is None:
@@ -797,18 +1058,33 @@ class AgentLoop:
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
         logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)
 
-        # If message tool was used, record the actual sent content instead of LLM summary
+        message_tool_sent = False
         if message_tool := self.tools.get("message"):
             if isinstance(message_tool, MessageTool) and message_tool._sent_in_turn:
+                message_tool_sent = True
                 final_content = message_tool._last_sent_content or final_content
 
-        task_state = self._complete_current_step(task_state, final_content, task_evidence)
+        step_before = self._get_current_step(task_state)
+        previous_step_index = step_before.index if step_before is not None else None
+        spawn_info = self._maybe_extract_spawn_result(tool_events)
+        step_finished = False
+        if spawn_info is not None:
+            task_state = self._mark_step_waiting_subagent(
+                task_state,
+                spawn_info["spawn_task_id"],
+                spawn_info["result"],
+            )
+        else:
+            task_state = self._complete_current_step(task_state, final_content, task_evidence)
+            if previous_step_index is not None:
+                step_finished = task_state is None or task_state.current_step_index != previous_step_index
 
-        session.add_message("user", msg.content, media=msg.media if msg.media else None)
-        session.add_message(
-            "assistant", final_content, tools_used=tools_used if tools_used else None
-        )
-        self.sessions.save(session)
+        if not internal_task_event:
+            session.add_message("user", msg.content, media=msg.media if msg.media else None)
+            session.add_message(
+                "assistant", final_content, tools_used=tools_used if tools_used else None
+            )
+            self.sessions.save(session)
 
         # Launch memory subagent in background (skip system/heartbeat/cron messages)
         is_heartbeat = session_key == "heartbeat" or msg.content.startswith("Read HEARTBEAT.md")
@@ -816,6 +1092,7 @@ class AgentLoop:
         if (
             self._memory_agent_enabled
             and msg.channel != "system"
+            and not internal_task_event
             and not is_heartbeat
             and not is_cron
         ):
@@ -835,10 +1112,6 @@ class AgentLoop:
                 )
                 self._pending_tasks.append(task)
 
-        if message_tool := self.tools.get("message"):
-            if isinstance(message_tool, MessageTool) and message_tool._sent_in_turn:
-                return None
-
         meta = dict(msg.metadata or {})
         meta["context_size"] = context_metrics
         meta["mode"] = route.mode
@@ -848,6 +1121,43 @@ class AgentLoop:
             meta["task_current_step_id"] = task_state.current_step_id
         if token_usage and any(v > 0 for v in token_usage.values()):
             meta["token_usage"] = token_usage
+
+        continuation_scheduled = False
+        if step_finished and task_state and task_state.phase == "executing":
+            continuation_scheduled = await self._publish_task_continuation(
+                task_state,
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                session_key=session.key,
+                reason=msg.sender_id,
+            )
+            if continuation_scheduled:
+                meta["continuation_scheduled"] = True
+
+        if message_tool_sent:
+            return None
+
+        if silent_internal:
+            if task_state is None:
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=final_content,
+                    metadata=meta,
+                )
+            if task_state.phase in {"blocked", "completed"}:
+                content = final_content
+                if task_state.phase == "blocked" and not content:
+                    content = task_state.waiting_reason or "任务已暂停，等待进一步处理。"
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=content,
+                    metadata=meta,
+                )
+            if continuation_scheduled or task_state.phase == "waiting_subagent":
+                return None
+
         return OutboundMessage(
             channel=msg.channel,
             chat_id=msg.chat_id,
