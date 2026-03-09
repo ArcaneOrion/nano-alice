@@ -1,5 +1,9 @@
 import asyncio
 import json
+import sys
+from types import SimpleNamespace
+
+import pytest
 
 from nano_alice.bus.events import OutboundMessage
 from nano_alice.bus.queue import MessageBus
@@ -50,5 +54,64 @@ def test_whatsapp_send_returns_failed_receipt_on_error_ack() -> None:
         )
         assert receipt.status == "failed"
         assert receipt.error == "device offline"
+
+    asyncio.run(scenario())
+
+
+class CleanCloseWebSocket:
+    def __init__(self, channel: WhatsAppChannel):
+        self.channel = channel
+        self._send_seen = asyncio.Event()
+
+    async def send(self, raw: str) -> None:
+        json.loads(raw)
+        self._send_seen.set()
+
+    async def close(self) -> None:
+        self.channel._running = False
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self) -> str:
+        await self._send_seen.wait()
+        self.channel._running = False
+        raise StopAsyncIteration
+
+
+class FakeConnect:
+    def __init__(self, ws: CleanCloseWebSocket):
+        self.ws = ws
+
+    async def __aenter__(self) -> CleanCloseWebSocket:
+        return self.ws
+
+    async def __aexit__(self, exc_type, exc, tb) -> bool:
+        return False
+
+
+def test_whatsapp_send_fails_immediately_on_clean_bridge_close(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def scenario() -> None:
+        channel = WhatsAppChannel(WhatsAppConfig(), MessageBus())
+        ws = CleanCloseWebSocket(channel)
+        monkeypatch.setitem(
+            sys.modules,
+            "websockets",
+            SimpleNamespace(connect=lambda _: FakeConnect(ws)),
+        )
+
+        start_task = asyncio.create_task(channel.start())
+        await asyncio.sleep(0)
+
+        receipt = await channel.send(
+            OutboundMessage(channel="whatsapp", chat_id="user@s.whatsapp.net", content="提醒一下")
+        )
+
+        await start_task
+
+        assert receipt.status == "failed"
+        assert receipt.error == "WhatsApp bridge connection closed"
+        assert channel._connected is False
+        assert channel._ws is None
 
     asyncio.run(scenario())

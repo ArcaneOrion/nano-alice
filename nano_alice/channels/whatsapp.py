@@ -16,13 +16,13 @@ from nano_alice.config.schema import WhatsAppConfig
 class WhatsAppChannel(BaseChannel):
     """
     WhatsApp channel that connects to a Node.js bridge.
-    
+
     The bridge uses @whiskeysockets/baileys to handle the WhatsApp Web protocol.
     Communication between Python and Node.js is via WebSocket.
     """
-    
+
     name = "whatsapp"
-    
+
     def __init__(self, config: WhatsAppConfig, bus: MessageBus):
         super().__init__(config, bus)
         self.config: WhatsAppConfig = config
@@ -30,17 +30,17 @@ class WhatsAppChannel(BaseChannel):
         self._connected = False
         self._pending_sends: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._send_timeout_seconds = 15.0
-    
+
     async def start(self) -> None:
         """Start the WhatsApp channel by connecting to the bridge."""
         import websockets
-        
+
         bridge_url = self.config.bridge_url
-        
+
         logger.info("Connecting to WhatsApp bridge at {}...", bridge_url)
-        
+
         self._running = True
-        
+
         while self._running:
             try:
                 async with websockets.connect(bridge_url) as ws:
@@ -50,7 +50,7 @@ class WhatsAppChannel(BaseChannel):
                         await ws.send(json.dumps({"type": "auth", "token": self.config.bridge_token}))
                     self._connected = True
                     logger.info("Connected to WhatsApp bridge")
-                    
+
                     # Listen for messages
                     async for message in ws:
                         try:
@@ -58,19 +58,23 @@ class WhatsAppChannel(BaseChannel):
                         except Exception as e:
                             logger.error("Error handling bridge message: {}", e)
 
+                    self._handle_disconnect("WhatsApp bridge connection closed")
+                    if self._running:
+                        logger.info("WhatsApp bridge connection closed, reconnecting in 5 seconds...")
+                        await asyncio.sleep(5)
+                        continue
+
             except asyncio.CancelledError:
-                self._fail_pending_sends("WhatsApp bridge connection cancelled")
+                self._handle_disconnect("WhatsApp bridge connection cancelled")
                 break
             except Exception as e:
-                self._connected = False
-                self._ws = None
-                self._fail_pending_sends(f"WhatsApp bridge connection error: {e}")
+                self._handle_disconnect(f"WhatsApp bridge connection error: {e}")
                 logger.warning("WhatsApp bridge connection error: {}", e)
-                
+
                 if self._running:
                     logger.info("Reconnecting in 5 seconds...")
                     await asyncio.sleep(5)
-    
+
     async def stop(self) -> None:
         """Stop the WhatsApp channel."""
         self._running = False
@@ -80,13 +84,13 @@ class WhatsAppChannel(BaseChannel):
         if self._ws:
             await self._ws.close()
             self._ws = None
-    
+
     async def send(self, msg: OutboundMessage):
         """Send a message through WhatsApp."""
         if not self._ws or not self._connected:
             logger.warning("WhatsApp bridge not connected")
             return self._failed_receipt(msg, "WhatsApp bridge not connected")
-        
+
         try:
             request_id = uuid.uuid4().hex
             loop = asyncio.get_running_loop()
@@ -123,27 +127,27 @@ class WhatsAppChannel(BaseChannel):
         except json.JSONDecodeError:
             logger.warning("Invalid JSON from bridge: {}", raw[:100])
             return
-        
+
         msg_type = data.get("type")
 
         if msg_type == "message":
             # Incoming message from WhatsApp
             # Deprecated by whatsapp: old phone number style typically: <phone>@s.whatspp.net
             pn = data.get("pn", "")
-            # New LID sytle typically: 
+            # New LID sytle typically:
             sender = data.get("sender", "")
             content = data.get("content", "")
-            
+
             # Extract just the phone number or lid as chat_id
             user_id = pn if pn else sender
             sender_id = user_id.split("@")[0] if "@" in user_id else user_id
             logger.info("Sender {}", sender)
-            
+
             # Handle voice transcription if it's a voice message
             if content == "[Voice Message]":
                 logger.info("Voice message received from {}, but direct download from bridge is not yet supported.", sender_id)
                 content = "[Voice Message: Transcription not available for WhatsApp yet]"
-            
+
             await self._handle_message(
                 sender_id=sender_id,
                 chat_id=sender,  # Use full LID for replies
@@ -171,8 +175,7 @@ class WhatsAppChannel(BaseChannel):
             if status == "connected":
                 self._connected = True
             elif status == "disconnected":
-                self._connected = False
-                self._fail_pending_sends("WhatsApp bridge disconnected")
+                self._handle_disconnect("WhatsApp bridge disconnected")
 
         elif msg_type == "qr":
             # QR code for authentication
@@ -190,3 +193,8 @@ class WhatsAppChannel(BaseChannel):
         for request_id, future in list(self._pending_sends.items()):
             if not future.done():
                 future.set_result({"type": "error", "request_id": request_id, "error": error})
+
+    def _handle_disconnect(self, error: str) -> None:
+        self._connected = False
+        self._ws = None
+        self._fail_pending_sends(error)
