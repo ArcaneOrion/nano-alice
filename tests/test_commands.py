@@ -57,7 +57,28 @@ def test_onboard_fresh_install(mock_paths):
     assert config_file.exists()
     assert (workspace_dir / "AGENTS.md").exists()
     assert (workspace_dir / "IDENTITY.md").exists()
+    assert (workspace_dir / "TOOLS.md").exists()
     assert (workspace_dir / "memory" / "MEMORY.md").exists()
+    assert (workspace_dir / "memory" / "SCRATCH.md").exists()
+    assert (workspace_dir / "memory" / "projects.md").exists()
+
+    identity_content = (workspace_dir / "IDENTITY.md").read_text(encoding="utf-8")
+    tools_content = (workspace_dir / "TOOLS.md").read_text(encoding="utf-8")
+    memory_content = (workspace_dir / "memory" / "MEMORY.md").read_text(encoding="utf-8")
+
+    assert not identity_content.startswith("<?xml")
+    assert identity_content.startswith("<identity>")
+    assert "<identity>" in identity_content
+    assert "文件分工" in identity_content
+    assert "nano-alice cron" in tools_content
+    assert '<example command="nanobot cron' not in tools_content
+    assert "2030-01-01T15:00:00" in tools_content
+    assert "replace with your actual target time" in tools_content
+    assert "current semantics" in tools_content
+    assert "Put project status in `projects.md`" in memory_content
+    assert "Or override sensitive fields with" in result.stdout
+    assert "Get one at: https://openrouter.ai/keys" not in result.stdout
+    assert "allowFrom" in result.stdout
 
 
 def test_onboard_existing_config_refresh(mock_paths):
@@ -98,7 +119,24 @@ def test_onboard_existing_workspace_safe_create(mock_paths):
     assert result.exit_code == 0
     assert "Created workspace" not in result.stdout
     assert "Created AGENTS.md" in result.stdout
+    assert "Created TOOLS.md" in result.stdout
     assert (workspace_dir / "AGENTS.md").exists()
+    assert (workspace_dir / "TOOLS.md").exists()
+
+
+def test_onboard_does_not_overwrite_existing_templates(mock_paths):
+    """Existing bootstrap files should be preserved, while missing ones are added."""
+    _, workspace_dir = mock_paths
+    workspace_dir.mkdir(parents=True)
+    existing_identity = workspace_dir / "IDENTITY.md"
+    existing_identity.write_text("custom identity", encoding="utf-8")
+
+    result = runner.invoke(app, ["onboard"])
+
+    assert result.exit_code == 0
+    assert existing_identity.read_text(encoding="utf-8") == "custom identity"
+    assert (workspace_dir / "TOOLS.md").exists()
+    assert (workspace_dir / "memory" / "lessons.md").exists()
 
 
 def test_config_matches_github_copilot_codex_with_hyphen_prefix():
