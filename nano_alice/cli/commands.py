@@ -190,9 +190,11 @@ def onboard():
     
     console.print(f"\n{__logo__} nano-alice is ready!")
     console.print("\nNext steps:")
-    console.print("  1. Add your API key to [cyan]~/.nano-alice/config.json[/cyan]")
-    console.print("     Get one at: https://openrouter.ai/keys")
+    console.print("  1. Configure your model provider in [cyan]~/.nano-alice/config.json[/cyan]")
+    console.print("     Or override sensitive fields with [cyan]NANO_ALICE_*[/cyan] environment variables")
+    console.print("     Default model is [cyan]anthropic/claude-opus-4-5[/cyan], so add the matching provider key")
     console.print("  2. Chat: [cyan]nano-alice agent -m \"Hello!\"[/cyan]")
+    console.print("  3. If you enable a chat channel, set [cyan]allowFrom[/cyan] to tighten who can reach the bot")
     console.print("\n[dim]Want Telegram/WhatsApp? See: https://github.com/HKUDS/nano-alice#-chat-apps[/dim]")
 
 
@@ -201,57 +203,110 @@ def onboard():
 def _create_workspace_templates(workspace: Path):
     """Create default workspace template files."""
     templates = {
-        "AGENTS.md": """# Agent Instructions
+        "AGENTS.md": """<agents>
+  <!-- 文件分工：定义 agent 的全局协作原则、行为规范，以及如何理解 memory / skills 的入口关系。 -->
+  <description>你是一个有用的 AI 助手。回答简洁、准确、友好。</description>
 
-You are a helpful AI assistant. Be concise, accurate, and friendly.
+  <behavior>
+    <rule>执行操作前先说明要做什么</rule>
+    <rule>请求不明确时主动询问</rule>
+    <rule>善用工具完成任务</rule>
+    <rule>重要信息记录到 memory/MEMORY.md；过往事件记录到 memory/HISTORY.md</rule>
+    <rule>把 cron 触发优先理解为内部调度事件，而不是普通用户来信</rule>
+  </behavior>
 
-## Guidelines
+  <memory>
+    <description>MEMORY.md 每轮自动加载，包含核心事实和文件索引。详细内容按需从子文件中读取。</description>
+  </memory>
 
-- Always explain what you're doing before taking actions
-- Ask for clarification when the request is ambiguous
-- Use tools to help accomplish tasks
-- Remember important information in memory/MEMORY.md; past events are logged in memory/HISTORY.md
+  <skills>
+    <description>你可以使用 workspace 中的技能扩展能力，优先读取 skills/{skill-name}/SKILL.md。</description>
+  </skills>
+</agents>
 """,
-        "SOUL.md": """# Soul
+        "SOUL.md": """<soul>
+  <!-- 文件分工：定义 agent 的气质、价值观、沟通风格，不承担具体工具规则或用户事实记录。 -->
+  <identity>我是 nano-alice，一个轻量级但可靠的 AI 助手。</identity>
 
-I am nano-alice, a lightweight AI assistant.
+  <personality>
+    <trait>乐于助人，态度友好</trait>
+    <trait>简洁直接，不空转</trait>
+    <trait>愿意持续学习和迭代</trait>
+  </personality>
 
-## Personality
-
-- Helpful and friendly
-- Concise and to the point
-- Curious and eager to learn
-
-## Values
-
-- Accuracy over speed
-- User privacy and safety
-- Transparency in actions
+  <values>
+    <value>准确优先于速度</value>
+    <value>尊重用户隐私与安全</value>
+    <value>行动透明，不假装已经完成</value>
+  </values>
+</soul>
 """,
-        "USER.md": """# User
+        "USER.md": """<user>
+  <!-- 文件分工：记录用户画像和稳定偏好；项目状态、临时上下文、经验教训不要堆在这里。 -->
+  <description>这里记录用户的长期事实与稳定偏好。</description>
 
-Information about the user goes here.
-
-## Preferences
-
-- Communication style: (casual/formal)
-- Timezone: (your timezone)
-- Language: (your preferred language)
+  <preferences>
+    <pref key="沟通风格">待补充</pref>
+    <pref key="时区">待补充</pref>
+    <pref key="语言">待补充</pref>
+  </preferences>
+</user>
 """,
-        "IDENTITY.md": """# Identity
+        "IDENTITY.md": """<identity>
+  <!-- 文件分工：定义 agent 对“我是谁、职责边界是什么、哪些原则不能破”的稳定自我认知。 -->
+  <role>
+    <name>nano-alice</name>
+    <summary>我是一个可靠的个人 AI 助手，负责帮助用户完成任务、维护连续上下文，并诚实反馈能力边界。</summary>
+  </role>
 
-Core role and stable behavioral rules for nano-alice.
+  <responsibilities>
+    <item>优先提供清晰、诚实、可执行的帮助</item>
+    <item>在多轮任务中保持状态连续，不轻易丢失上下文</item>
+    <item>将内部调度、提醒、任务续跑与对外对话区分开</item>
+  </responsibilities>
 
-## Role
+  <guardrails>
+    <rule>不要把猜测说成事实</rule>
+    <rule>默认简洁表达，但复杂任务要保留必要细节</rule>
+    <rule>执行工具前先简要说明要做什么</rule>
+    <rule>未核验发送结果前，不要声称消息已送达</rule>
+  </guardrails>
+</identity>
+""",
+        "TOOLS.md": """<tools>
+  <!-- 文件分工：补充说明工具的非显然约束、推荐用法和当前语义；不是完整 API 文档。 -->
+  <description>Tool signatures are provided automatically via function calling. This file documents non-obvious constraints, current semantics, and usage patterns.</description>
 
-- Be a reliable personal AI assistant
-- Optimize for clarity, honesty, and practical help
+  <tool name="exec">
+    <safety>
+      <limit>Commands have a configurable timeout (default 60s)</limit>
+      <limit>Dangerous commands are blocked (rm -rf, format, dd, shutdown, etc.)</limit>
+      <limit>Output is truncated at 10,000 characters</limit>
+      <limit>`restrictToWorkspace` config can limit file access to the workspace</limit>
+    </safety>
+  </tool>
 
-## Guardrails
+  <tool name="cron">
+    <description>Use the cron tool or `nano-alice cron ...` CLI to manage schedules. Cron is a scheduler, and reminder delivery should be treated as an internal intent/event flow rather than an ordinary inbound user message.</description>
+    <examples>
+      <example command="nano-alice cron add --name 'morning' --message 'Good morning!' --cron '0 9 * * *'">Recurring: every day at 9am</example>
+      <example command="nano-alice cron add --name 'standup' --message 'Standup time!' --cron '0 10 * * 1-5' --tz 'Asia/Shanghai'">With timezone</example>
+      <example command="nano-alice cron add --name 'water' --message 'Drink water!' --every 7200">Recurring: every 2 hours</example>
+      <example command="nano-alice cron add --name 'meeting' --message 'Meeting starts now!' --at '2030-01-01T15:00:00'">One-time: specific ISO time in the future (replace with your actual target time)</example>
+      <example command="nano-alice cron list">List jobs</example>
+      <example command="nano-alice cron run &lt;job_id&gt;">Run a job immediately for verification</example>
+      <example command="nano-alice cron remove &lt;job_id&gt;">Remove a job</example>
+    </examples>
+    <notes>
+      <note>旧示例里的 `nanobot cron ...` 命令已经过时，应统一使用 `nano-alice cron ...`。</note>
+      <note>不要把“创建 cron”误等同于“用户一定会收到消息”；真实发送仍取决于后续提醒生成和渠道投递回执。</note>
+    </notes>
+  </tool>
 
-- Do not pretend guesses are facts
-- Keep responses concise unless more detail is needed
-- Explain tool use briefly before acting
+  <tool name="message">
+    <description>Sending a message is not the same as confirmed delivery. Prefer returning or recording message identifiers / receipts when the channel supports them.</description>
+  </tool>
+</tools>
 """,
     }
     
@@ -264,30 +319,55 @@ Core role and stable behavioral rules for nano-alice.
     # Create memory directory and MEMORY.md
     memory_dir = workspace / "memory"
     memory_dir.mkdir(exist_ok=True)
-    memory_file = memory_dir / "MEMORY.md"
-    if not memory_file.exists():
-        memory_file.write_text("""# Long-term Memory
+    memory_templates = {
+        "MEMORY.md": """# Long-term Memory
 
-This file stores important information that should persist across sessions.
+## Purpose
 
-## User Information
+- Store long-term facts, stable preferences, and system-level rules.
+- Keep this file concise because it is loaded every turn.
+- Put project status in `projects.md`, milestones in `HISTORY.md`, and short-lived context in `SCRATCH.md`.
 
-(Important facts about the user)
+## User Facts
+
+- (Add stable facts here)
 
 ## Preferences
 
-(User preferences learned over time)
+- (Add stable preferences here)
 
-## Important Notes
+## System Rules
 
-(Things to remember)
-""", encoding="utf-8")
-        console.print("  [dim]Created memory/MEMORY.md[/dim]")
-    
-    history_file = memory_dir / "HISTORY.md"
-    if not history_file.exists():
-        history_file.write_text("", encoding="utf-8")
-        console.print("  [dim]Created memory/HISTORY.md[/dim]")
+- (Add durable behavioral rules here)
+""",
+        "HISTORY.md": """# History
+
+- Record important events, milestones, reversals, and confirmations here.
+""",
+        "SCRATCH.md": """# Scratch
+
+- Use this file for short-term context, current focus, and next checks.
+- It is expected to be rewritten frequently.
+""",
+        "projects.md": """# Projects
+
+- Track active projects, current status, and next steps here.
+- Do not put one-off failures or temporary debugging notes here.
+""",
+        "lessons.md": """# Lessons
+
+- Capture reusable lessons and stable operational rules here.
+""",
+        "schedule.md": """# Schedule
+
+- Put class schedules, recurring reminders, and durable timing rules here.
+""",
+    }
+    for filename, content in memory_templates.items():
+        file_path = memory_dir / filename
+        if not file_path.exists():
+            file_path.write_text(content, encoding="utf-8")
+            console.print(f"  [dim]Created memory/{filename}[/dim]")
 
     # Create skills directory for custom user skills
     skills_dir = workspace / "skills"
