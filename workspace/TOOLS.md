@@ -1,6 +1,6 @@
 # Available Tools
 
-This document describes the tools available to nanobot.
+This document describes the tools available to nano-alice.
 
 ## File Operations
 
@@ -165,6 +165,6 @@ nix-shell -p grim -p slurp --run 'grim -g "$(slurp)" /tmp/screenshot.png'
 ## Adding Custom Tools
 
 To add custom tools:
-1. Create a class that extends `Tool` in `nanobot/agent/tools/`
+1. Create a class that extends `Tool` in `nano_alice/agent/tools/`
 2. Implement `name`, `description`, `parameters`, and `execute`
 3. Register it in `AgentLoop._register_default_tools()`

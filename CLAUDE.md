@@ -11,7 +11,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概述
 
-nano-alice 是一个超轻量个人 AI 助手框架（~4,000 行核心代码），基于 nanobot 独立开发。Python ≥3.11，构建后端 hatchling。
+nano-alice 是一个超轻量个人 AI 助手框架（~4,000 行核心代码），早期源自 nanobot，现已独立开发维护。Python ≥3.11，构建后端 hatchling。
 
 ## 构建与开发命令
 
