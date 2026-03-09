@@ -141,7 +141,9 @@ class EmailChannel(BaseChannel):
             email_msg["References"] = in_reply_to
 
         try:
-            await asyncio.to_thread(self._smtp_send, email_msg)
+            # Python 3.14 in our current runtime can hang when SMTP send is wrapped in
+            # the default asyncio thread executor, even after the worker completes.
+            self._smtp_send(email_msg)
         except Exception as e:
             logger.error("Error sending email to {}: {}", to_addr, e)
             raise
