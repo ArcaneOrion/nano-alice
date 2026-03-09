@@ -287,7 +287,7 @@ def _create_workspace_templates(workspace: Path):
   </tool>
 
   <tool name="cron">
-    <description>Use the cron tool or `nano-alice cron ...` CLI to manage schedules. Cron is a scheduler, and reminder delivery should be treated as an internal intent/event flow rather than an ordinary inbound user message.</description>
+    <description>Use the cron tool or `nano-alice cron ...` CLI to manage the agent's internal scheduled jobs. Cron is primarily an internal scheduler / self-wakeup mechanism: when a job becomes due, it should be treated as an internal reminder intent/event flow rather than an ordinary inbound user message. It can be used to implement reminders, recurring tasks, and delayed follow-ups.</description>
     <examples>
       <example command="nano-alice cron add --name 'morning' --message 'Good morning!' --cron '0 9 * * *'">Recurring: every day at 9am</example>
       <example command="nano-alice cron add --name 'standup' --message 'Standup time!' --cron '0 10 * * 1-5' --tz 'Asia/Shanghai'">With timezone</example>

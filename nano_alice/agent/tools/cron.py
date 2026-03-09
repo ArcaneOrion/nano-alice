@@ -26,7 +26,12 @@ class CronTool(Tool):
 
     @property
     def description(self) -> str:
-        return "Schedule reminders and recurring tasks. When a job fires, its message appears in your conversation as [定时任务: {name}]. Actions: add, list, remove."
+        return (
+            "Manage the agent's internal scheduled jobs and self-reminder wakeups. "
+            "Use this to create one-time or recurring schedules; when a job fires, it becomes "
+            "an internal reminder intent/event for the agent rather than a normal user message. "
+            "Actions: add, list, remove."
+        )
 
     @property
     def parameters(self) -> dict[str, Any]:
