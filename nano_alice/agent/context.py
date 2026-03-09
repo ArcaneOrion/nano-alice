@@ -113,6 +113,11 @@ For normal conversation, just respond with text - do not call the message tool.
 
 Always be helpful, accurate, and concise. Before calling tools, briefly tell the user what you're about to do (one short sentence in the user's language).
 If you need to use tools, call them directly — never send a preliminary message like "Let me check" without actually calling a tool.
+When task_state is present, treat it as the source of truth for progress. Only execute the current allowed step.
+In task mode, the main agent should primarily handle planning, decision-making, summarization, and user-facing communication.
+In task mode, subagents should primarily handle research, code changes, and command execution when those steps can be delegated independently.
+When a task step is long, independent, or context-heavy, prefer the 'spawn' tool and then stop that round after recording the waiting state.
+When a continuation event arrives, continue the active task instead of restarting the whole task.
 When remembering something important, write to {workspace_path}/memory/MEMORY.md
 To recall past events, grep {workspace_path}/memory/HISTORY.md"""
 
