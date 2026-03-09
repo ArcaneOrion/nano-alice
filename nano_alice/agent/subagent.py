@@ -58,7 +58,8 @@ class SubagentManager:
         label: str | None = None,
         origin_channel: str = "cli",
         origin_chat_id: str = "direct",
-    ) -> str:
+        task_id_hint: str | None = None,
+    ) -> dict[str, str]:
         """
         Spawn a subagent to execute a task in the background.
         
@@ -69,9 +70,9 @@ class SubagentManager:
             origin_chat_id: The chat ID to announce results to.
         
         Returns:
-            Status message indicating the subagent was started.
+            Structured payload indicating the subagent was started.
         """
-        task_id = str(uuid.uuid4())[:8]
+        task_id = task_id_hint or str(uuid.uuid4())[:8]
         display_label = label or task[:30] + ("..." if len(task) > 30 else "")
         
         origin = {
@@ -89,7 +90,17 @@ class SubagentManager:
         bg_task.add_done_callback(lambda _: self._running_tasks.pop(task_id, None))
         
         logger.info("Spawned subagent [{}]: {}", task_id, display_label)
-        return f"Subagent [{display_label}] started (id: {task_id}). I'll notify you when it completes."
+        return {
+            "message": (
+                f"Subagent task accepted.\n"
+                f"label: {display_label}\n"
+                f"id: {task_id}\n"
+                f"status: started"
+            ),
+            "label": display_label,
+            "id": task_id,
+            "status": "started",
+        }
     
     async def _run_subagent(
         self,
@@ -215,6 +226,13 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
             sender_id="subagent",
             chat_id=f"{origin['channel']}:{origin['chat_id']}",
             content=announce_content,
+            metadata={
+                "_subagent_result": True,
+                "_subagent_task_id": task_id,
+                "_subagent_status": status,
+                "_silent": True,
+                "_session_key": f"{origin['channel']}:{origin['chat_id']}",
+            },
         )
         
         await self.bus.publish_inbound(msg)
