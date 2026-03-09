@@ -250,6 +250,22 @@ def test_make_provider_uses_first_fallback_as_primary_when_model_not_explicitly_
     assert [child.api_base for child in provider.fallback_providers] == ["https://route-2.example.com/v1"]
 
 
+def test_make_provider_applies_configured_fallback_timeout_seconds():
+    config = Config()
+    config.agents.defaults.model = "openai1/gpt-5.4"
+    config.agents.defaults.models = ["openai1/gpt-5.4", "openai2/gpt-5.4"]
+    config.agents.defaults.fallback_timeout_seconds = 30
+    config.providers.openai_1.api_key = "sk-route-1"
+    config.providers.openai_1.api_base = "https://route-1.example.com/v1"
+    config.providers.openai_2.api_key = "sk-route-2"
+    config.providers.openai_2.api_base = "https://route-2.example.com/v1"
+
+    provider = _make_provider(config)
+
+    assert isinstance(provider, RotatingProvider)
+    assert provider.fallback_timeout_seconds == 30.0
+
+
 class _StubProvider(LLMProvider):
     def __init__(self, name: str, responses: list[LLMResponse]):
         super().__init__()
@@ -305,6 +321,42 @@ def test_rotating_provider_retries_primary_after_cooldown():
     assert response2.content == "primary-recovered"
     assert first.calls == 2
     assert second.calls == 1
+
+
+class _HangingProvider(LLMProvider):
+    def __init__(self, name: str):
+        super().__init__()
+        self.name = name
+        self.calls = 0
+
+    async def chat(self, messages, tools=None, model=None, max_tokens=4096, temperature=0.7):
+        self.calls += 1
+        await asyncio.sleep(3600)
+        return LLMResponse(content=f"{self.name}-late")
+
+    def get_default_model(self) -> str:
+        return self.name
+
+
+def test_rotating_provider_times_out_fallback_quickly():
+    first = _StubProvider(
+        "openai1/gpt-5.4",
+        [LLMResponse(content="Error: primary failed", finish_reason="error")],
+    )
+    hanging = _HangingProvider("openai2/gpt-5.4")
+    third = _StubProvider("openai3/gpt-5.4", [LLMResponse(content="third-ok")])
+    provider = RotatingProvider(
+        first,
+        [hanging, third],
+        fallback_timeout_seconds=0.01,
+    )
+
+    response = asyncio.run(provider.chat(messages=[{"role": "user", "content": "hi"}]))
+
+    assert response.content == "third-ok"
+    assert first.calls == 1
+    assert hanging.calls == 1
+    assert third.calls == 1
 
 
 def test_rotating_provider_deduplicates_primary_from_fallback_pool():

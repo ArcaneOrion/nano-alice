@@ -384,7 +384,11 @@ def _make_provider(
 
         primary_provider = _build_single_provider(primary_model)
         fallback_providers = [_build_single_provider(candidate) for candidate in fallback_models]
-        return RotatingProvider(primary_provider, fallback_providers)
+        return RotatingProvider(
+            primary_provider,
+            fallback_providers,
+            fallback_timeout_seconds=float(config.agents.defaults.fallback_timeout_seconds),
+        )
 
     model = model or config.agents.defaults.model
     provider_name = provider_name or (config.agents.defaults.provider if using_default_model else None)

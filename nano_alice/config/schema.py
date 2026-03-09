@@ -194,6 +194,7 @@ class AgentDefaults(Base):
     provider: str = ""  # empty = auto-match from model
     model: str = "anthropic/claude-opus-4-5"
     models: list[str] = Field(default_factory=list)  # optional fallback pool after `model` fails
+    fallback_timeout_seconds: int = 30
     max_tokens: int = 8192
     temperature: float = 0.7
     max_tool_iterations: int = 20

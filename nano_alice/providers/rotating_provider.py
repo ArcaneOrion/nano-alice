@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any, Callable
 
@@ -19,6 +20,8 @@ class RotatingProvider(LLMProvider):
         fallback_providers: list[LLMProvider] | None = None,
         *,
         cooldown_seconds: float = 15 * 60,
+        primary_timeout_seconds: float | None = None,
+        fallback_timeout_seconds: float = 30.0,
         time_fn: Callable[[], float] | None = None,
     ):
         super().__init__()
@@ -26,13 +29,17 @@ class RotatingProvider(LLMProvider):
         self.fallback_providers = fallback_providers or []
         self.providers = [primary_provider, *self.fallback_providers]
         self.cooldown_seconds = cooldown_seconds
+        self.primary_timeout_seconds = primary_timeout_seconds
+        self.fallback_timeout_seconds = fallback_timeout_seconds
         self._time_fn = time_fn or time.monotonic
         self._active_fallback_index: int | None = None
         self._fallback_started_at: float | None = None
         logger.info(
-            "Endpoint pool initialized: primary={} fallback_count={} pool={}",
+            "Endpoint pool initialized: primary={} fallback_count={} primary_timeout_seconds={} fallback_timeout_seconds={} pool={}",
             self._provider_label(self.primary_provider),
             len(self.fallback_providers),
+            self.primary_timeout_seconds,
+            self.fallback_timeout_seconds,
             [self._provider_label(provider) for provider in self.providers],
         )
 
@@ -63,6 +70,7 @@ class RotatingProvider(LLMProvider):
                 model=model,
                 max_tokens=max_tokens,
                 temperature=temperature,
+                timeout_seconds=self.primary_timeout_seconds,
             )
             if primary_response.finish_reason != "error":
                 return primary_response
@@ -124,6 +132,7 @@ class RotatingProvider(LLMProvider):
                 model=None,
                 max_tokens=max_tokens,
                 temperature=temperature,
+                timeout_seconds=self.fallback_timeout_seconds,
             )
             if fallback_response.finish_reason != "error":
                 self._active_fallback_index = index
@@ -154,14 +163,28 @@ class RotatingProvider(LLMProvider):
         model: str | None,
         max_tokens: int,
         temperature: float,
+        timeout_seconds: float | None,
     ) -> LLMResponse:
         try:
-            return await provider.chat(
+            call = provider.chat(
                 messages=messages,
                 tools=tools,
                 model=model,
                 max_tokens=max_tokens,
                 temperature=temperature,
+            )
+            if timeout_seconds is not None:
+                return await asyncio.wait_for(call, timeout=timeout_seconds)
+            return await call
+        except TimeoutError:
+            logger.warning(
+                "Endpoint request timed out: provider={} timeout_seconds={}",
+                self._provider_label(provider),
+                timeout_seconds,
+            )
+            return LLMResponse(
+                content=f"Error: request timed out after {timeout_seconds:.1f}s",
+                finish_reason="error",
             )
         except Exception as exc:
             logger.error(
