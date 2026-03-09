@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import uuid
 from typing import Any
 
 from loguru import logger
@@ -27,6 +28,8 @@ class WhatsAppChannel(BaseChannel):
         self.config: WhatsAppConfig = config
         self._ws = None
         self._connected = False
+        self._pending_sends: dict[str, asyncio.Future[dict[str, Any]]] = {}
+        self._send_timeout_seconds = 15.0
     
     async def start(self) -> None:
         """Start the WhatsApp channel by connecting to the bridge."""
@@ -54,12 +57,14 @@ class WhatsAppChannel(BaseChannel):
                             await self._handle_bridge_message(message)
                         except Exception as e:
                             logger.error("Error handling bridge message: {}", e)
-                    
+
             except asyncio.CancelledError:
+                self._fail_pending_sends("WhatsApp bridge connection cancelled")
                 break
             except Exception as e:
                 self._connected = False
                 self._ws = None
+                self._fail_pending_sends(f"WhatsApp bridge connection error: {e}")
                 logger.warning("WhatsApp bridge connection error: {}", e)
                 
                 if self._running:
@@ -70,27 +75,47 @@ class WhatsAppChannel(BaseChannel):
         """Stop the WhatsApp channel."""
         self._running = False
         self._connected = False
-        
+        self._fail_pending_sends("WhatsApp bridge stopped")
+
         if self._ws:
             await self._ws.close()
             self._ws = None
     
-    async def send(self, msg: OutboundMessage) -> None:
+    async def send(self, msg: OutboundMessage):
         """Send a message through WhatsApp."""
         if not self._ws or not self._connected:
             logger.warning("WhatsApp bridge not connected")
-            return
+            return self._failed_receipt(msg, "WhatsApp bridge not connected")
         
         try:
+            request_id = uuid.uuid4().hex
+            loop = asyncio.get_running_loop()
+            future: asyncio.Future[dict[str, Any]] = loop.create_future()
+            self._pending_sends[request_id] = future
             payload = {
                 "type": "send",
                 "to": msg.chat_id,
-                "text": msg.content
+                "text": msg.content,
+                "request_id": request_id,
             }
             await self._ws.send(json.dumps(payload, ensure_ascii=False))
+            ack = await asyncio.wait_for(future, timeout=self._send_timeout_seconds)
+            if ack.get("type") == "sent":
+                return self._success_receipt(
+                    msg,
+                    provider_message_id=str(ack.get("message_id") or request_id),
+                )
+            error = str(ack.get("error") or "WhatsApp bridge rejected message")
+            return self._failed_receipt(msg, error)
+        except asyncio.TimeoutError:
+            logger.error("WhatsApp bridge send ack timeout for chat {}", msg.chat_id)
+            return self._failed_receipt(msg, "WhatsApp bridge send ack timeout")
         except Exception as e:
             logger.error("Error sending WhatsApp message: {}", e)
-    
+            return self._failed_receipt(msg, str(e))
+        finally:
+            self._pending_sends.pop(request_id, None)
+
     async def _handle_bridge_message(self, raw: str) -> None:
         """Handle a message from the bridge."""
         try:
@@ -100,7 +125,7 @@ class WhatsAppChannel(BaseChannel):
             return
         
         msg_type = data.get("type")
-        
+
         if msg_type == "message":
             # Incoming message from WhatsApp
             # Deprecated by whatsapp: old phone number style typically: <phone>@s.whatspp.net
@@ -129,20 +154,39 @@ class WhatsAppChannel(BaseChannel):
                     "is_group": data.get("isGroup", False)
                 }
             )
-        
+
+        elif msg_type == "sent":
+            request_id = str(data.get("request_id") or "")
+            future = self._pending_sends.get(request_id)
+            if future and not future.done():
+                future.set_result(data)
+            else:
+                logger.debug("Ignoring unmatched WhatsApp sent ack: {}", request_id or "-")
+
         elif msg_type == "status":
             # Connection status update
             status = data.get("status")
             logger.info("WhatsApp status: {}", status)
-            
+
             if status == "connected":
                 self._connected = True
             elif status == "disconnected":
                 self._connected = False
-        
+                self._fail_pending_sends("WhatsApp bridge disconnected")
+
         elif msg_type == "qr":
             # QR code for authentication
             logger.info("Scan QR code in the bridge terminal to connect WhatsApp")
-        
+
         elif msg_type == "error":
-            logger.error("WhatsApp bridge error: {}", data.get('error'))
+            request_id = str(data.get("request_id") or "")
+            future = self._pending_sends.get(request_id)
+            if future and not future.done():
+                future.set_result(data)
+            else:
+                logger.error("WhatsApp bridge error: {}", data.get("error"))
+
+    def _fail_pending_sends(self, error: str) -> None:
+        for request_id, future in list(self._pending_sends.items()):
+            if not future.done():
+                future.set_result({"type": "error", "request_id": request_id, "error": error})

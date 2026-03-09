@@ -10,10 +10,11 @@ interface SendCommand {
   type: 'send';
   to: string;
   text: string;
+  request_id?: string;
 }
 
 interface BridgeMessage {
-  type: 'message' | 'status' | 'qr' | 'error';
+  type: 'message' | 'status' | 'qr' | 'error' | 'sent';
   [key: string]: unknown;
 }
 
@@ -74,10 +75,17 @@ export class BridgeServer {
       try {
         const cmd = JSON.parse(data.toString()) as SendCommand;
         await this.handleCommand(cmd);
-        ws.send(JSON.stringify({ type: 'sent', to: cmd.to }));
+        ws.send(JSON.stringify({ type: 'sent', to: cmd.to, request_id: cmd.request_id }));
       } catch (error) {
         console.error('Error handling command:', error);
-        ws.send(JSON.stringify({ type: 'error', error: String(error) }));
+        const parsed = JSON.parse(data.toString()) as Partial<SendCommand>;
+        ws.send(
+          JSON.stringify({
+            type: 'error',
+            error: String(error),
+            request_id: parsed.request_id,
+          })
+        );
       }
     });
 

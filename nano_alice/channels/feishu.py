@@ -570,7 +570,9 @@ class FeishuChannel(BaseChannel):
 
         return None, f"[{msg_type}: download failed]"
 
-    def _send_message_sync(self, receive_id_type: str, receive_id: str, msg_type: str, content: str) -> bool:
+    def _send_message_sync(
+        self, receive_id_type: str, receive_id: str, msg_type: str, content: str
+    ) -> str | None:
         """Send a single message (text/image/file/interactive) synchronously."""
         try:
             request = CreateMessageRequest.builder() \
@@ -588,22 +590,37 @@ class FeishuChannel(BaseChannel):
                     "Failed to send Feishu {} message: code={}, msg={}, log_id={}",
                     msg_type, response.code, response.msg, response.get_log_id()
                 )
-                return False
+                return None
             logger.debug("Feishu {} message sent to {}", msg_type, receive_id)
-            return True
+            data = getattr(response, "data", None)
+            return str(getattr(data, "message_id", "") or "")
         except Exception as e:
             logger.error("Error sending Feishu {} message: {}", msg_type, e)
-            return False
+            return None
 
-    async def send(self, msg: OutboundMessage) -> None:
+    async def send(self, msg: OutboundMessage):
         """Send a message through Feishu, including media (images/files) if present."""
         if not self._client:
             logger.warning("Feishu client not initialized")
-            return
+            return self._failed_receipt(msg, "Feishu client not initialized")
 
         try:
             receive_id_type = "chat_id" if msg.chat_id.startswith("oc_") else "open_id"
             loop = asyncio.get_running_loop()
+            last_message_id = ""
+
+            async def _send_and_require_id(msg_type: str, content: str) -> str:
+                sent_id = await loop.run_in_executor(
+                    None,
+                    self._send_message_sync,
+                    receive_id_type,
+                    msg.chat_id,
+                    msg_type,
+                    content,
+                )
+                if not sent_id:
+                    raise RuntimeError(f"Feishu API rejected {msg_type} message")
+                return str(sent_id)
 
             for file_path in msg.media:
                 if not os.path.isfile(file_path):
@@ -613,17 +630,17 @@ class FeishuChannel(BaseChannel):
                 if ext in self._IMAGE_EXTS:
                     key = await loop.run_in_executor(None, self._upload_image_sync, file_path)
                     if key:
-                        await loop.run_in_executor(
-                            None, self._send_message_sync,
-                            receive_id_type, msg.chat_id, "image", json.dumps({"image_key": key}, ensure_ascii=False),
+                        last_message_id = await _send_and_require_id(
+                            "image",
+                            json.dumps({"image_key": key}, ensure_ascii=False),
                         )
                 else:
                     key = await loop.run_in_executor(None, self._upload_file_sync, file_path)
                     if key:
                         media_type = "audio" if ext in self._AUDIO_EXTS else "file"
-                        await loop.run_in_executor(
-                            None, self._send_message_sync,
-                            receive_id_type, msg.chat_id, media_type, json.dumps({"file_key": key}, ensure_ascii=False),
+                        last_message_id = await _send_and_require_id(
+                            media_type,
+                            json.dumps({"file_key": key}, ensure_ascii=False),
                         )
 
             if msg.content and msg.content.strip():
@@ -671,13 +688,15 @@ class FeishuChannel(BaseChannel):
                                 "elements": [{"tag": "plain_text", "content": note}],
                             })
                 card = {"config": {"wide_screen_mode": True}, "elements": elements}
-                await loop.run_in_executor(
-                    None, self._send_message_sync,
-                    receive_id_type, msg.chat_id, "interactive", json.dumps(card, ensure_ascii=False),
+                last_message_id = await _send_and_require_id(
+                    "interactive",
+                    json.dumps(card, ensure_ascii=False),
                 )
+            return self._success_receipt(msg, provider_message_id=last_message_id)
 
         except Exception as e:
             logger.error("Error sending Feishu message: {}", e)
+            return self._failed_receipt(msg, str(e))
     
     def _on_message_sync(self, data: "P2ImMessageReceiveV1") -> None:
         """
