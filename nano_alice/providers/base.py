@@ -4,6 +4,7 @@ import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import json_repair
 
@@ -24,7 +25,8 @@ class LLMResponse:
     finish_reason: str = "stop"
     usage: dict[str, int] = field(default_factory=dict)
     reasoning_content: str | None = None  # Kimi, DeepSeek-R1 etc.
-    
+    provider_metadata: dict[str, Any] = field(default_factory=dict)
+
     @property
     def has_tool_calls(self) -> bool:
         """Check if response contains tool calls."""
@@ -34,15 +36,15 @@ class LLMResponse:
 class LLMProvider(ABC):
     """
     Abstract base class for LLM providers.
-    
+
     Implementations should handle the specifics of each provider's API
     while maintaining a consistent interface.
     """
-    
+
     def __init__(self, api_key: str | None = None, api_base: str | None = None):
         self.api_key = api_key
         self.api_base = api_base
-    
+
     @abstractmethod
     async def chat(
         self,
@@ -54,23 +56,97 @@ class LLMProvider(ABC):
     ) -> LLMResponse:
         """
         Send a chat completion request.
-        
+
         Args:
             messages: List of message dicts with 'role' and 'content'.
             tools: Optional list of tool definitions.
             model: Model identifier (provider-specific).
             max_tokens: Maximum tokens in response.
             temperature: Sampling temperature.
-        
+
         Returns:
             LLMResponse with content and/or tool calls.
         """
         pass
-    
+
     @abstractmethod
     def get_default_model(self) -> str:
         """Get the default model for this provider."""
         pass
+
+
+def preview_text(text: str | None, limit: int = 200) -> str:
+    """Return a single-line preview for logging."""
+    if text is None:
+        return ""
+
+    preview = " ".join(text.strip().split())
+    if len(preview) <= limit:
+        return preview
+    return preview[:limit] + "..."
+
+
+def normalize_endpoint_label(endpoint: str | None) -> str:
+    """Return a stable endpoint label without query params or fragments."""
+    if not endpoint:
+        return "-"
+
+    try:
+        parts = urlsplit(endpoint)
+    except ValueError:
+        return endpoint
+
+    netloc = parts.hostname or parts.netloc or ""
+    if parts.port:
+        netloc = f"{netloc}:{parts.port}"
+    sanitized = urlunsplit((parts.scheme, netloc, parts.path, "", ""))
+    return sanitized or endpoint
+
+
+def summarize_tool_calls(tool_calls: list[ToolCallRequest]) -> str:
+    """Return a concise tool-call summary."""
+    if not tool_calls:
+        return "-"
+    parts: list[str] = []
+    for tool_call in tool_calls:
+        arg_count = len(tool_call.arguments) if isinstance(tool_call.arguments, dict) else 0
+        parts.append(f"{tool_call.name}({arg_count})")
+    return ", ".join(parts)
+
+
+def sanitize_headers(headers: dict[str, str] | None) -> dict[str, str]:
+    """Redact sensitive headers for logs."""
+    if not headers:
+        return {}
+
+    redacted: dict[str, str] = {}
+    for key, value in headers.items():
+        lowered = key.lower()
+        if lowered in {"authorization", "proxy-authorization", "x-api-key", "api-key"}:
+            redacted[key] = "***"
+        else:
+            redacted[key] = value
+    return redacted
+
+
+def build_provider_metadata(
+    *,
+    provider_name: str,
+    requested_model: str | None,
+    resolved_model: str | None = None,
+    endpoint: str | None = None,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Create standard provider-call metadata for logs and tracing."""
+    metadata: dict[str, Any] = {
+        "provider_name": provider_name,
+        "requested_model": requested_model or "-",
+        "resolved_model": resolved_model or requested_model or "-",
+        "endpoint": normalize_endpoint_label(endpoint),
+    }
+    if extra:
+        metadata.update(extra)
+    return metadata
 
 
 def parse_llm_response_payload(response: Any) -> LLMResponse:

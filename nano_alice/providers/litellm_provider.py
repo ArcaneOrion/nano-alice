@@ -3,16 +3,27 @@
 import os
 from typing import Any
 
+from loguru import logger
+
+from nano_alice.providers.base import (
+    LLMProvider,
+    LLMResponse,
+    build_provider_metadata,
+    normalize_endpoint_label,
+    parse_llm_response_payload,
+    preview_text,
+    sanitize_headers,
+    summarize_tool_calls,
+)
+from nano_alice.providers.registry import find_by_model, find_gateway
+
 # Patch httpx to allow UTF-8 in response headers (needed for some proxy servers)
 from nano_alice.utils import patch_httpx_for_utf8_headers
 
 patch_httpx_for_utf8_headers()
 
-import litellm
-from litellm import acompletion
-
-from nano_alice.providers.base import LLMProvider, LLMResponse, parse_llm_response_payload
-from nano_alice.providers.registry import find_by_model, find_gateway
+import litellm  # noqa: E402,I001
+from litellm import acompletion  # noqa: E402,I001
 
 
 # Standard OpenAI chat-completion message keys; extras (e.g. reasoning_content) are stripped for strict providers.
@@ -22,15 +33,15 @@ _ALLOWED_MSG_KEYS = frozenset({"role", "content", "tool_calls", "tool_call_id", 
 class LiteLLMProvider(LLMProvider):
     """
     LLM provider using LiteLLM for multi-provider support.
-    
+
     Supports OpenRouter, Anthropic, OpenAI, Gemini, MiniMax, and many other providers through
     a unified interface.  Provider-specific logic is driven by the registry
     (see providers/registry.py) — no if-elif chains needed here.
     """
-    
+
     def __init__(
-        self, 
-        api_key: str | None = None, 
+        self,
+        api_key: str | None = None,
         api_base: str | None = None,
         default_model: str = "anthropic/claude-opus-4-5",
         extra_headers: dict[str, str] | None = None,
@@ -39,24 +50,24 @@ class LiteLLMProvider(LLMProvider):
         super().__init__(api_key, api_base)
         self.default_model = default_model
         self.extra_headers = extra_headers or {}
-        
+
         # Detect gateway / local deployment.
         # provider_name (from config key) is the primary signal;
         # api_key / api_base are fallback for auto-detection.
         self._gateway = find_gateway(provider_name, api_key, api_base)
-        
+
         # Configure environment variables
         if api_key:
             self._setup_env(api_key, api_base, default_model)
-        
+
         if api_base:
             litellm.api_base = api_base
-        
+
         # Disable LiteLLM logging noise
         litellm.suppress_debug_info = True
         # Drop unsupported parameters for providers (e.g., gpt-5 rejects some params)
         litellm.drop_params = True
-    
+
     def _setup_env(self, api_key: str, api_base: str | None, model: str) -> None:
         """Set environment variables based on detected provider."""
         spec = self._gateway or find_by_model(model)
@@ -80,7 +91,7 @@ class LiteLLMProvider(LLMProvider):
             resolved = env_val.replace("{api_key}", api_key)
             resolved = resolved.replace("{api_base}", effective_base)
             os.environ.setdefault(env_name, resolved)
-    
+
     def _resolve_model(self, model: str) -> str:
         """Resolve model name by applying provider/gateway prefixes."""
         if self._gateway:
@@ -91,7 +102,7 @@ class LiteLLMProvider(LLMProvider):
             if prefix and not model.startswith(f"{prefix}/"):
                 model = f"{prefix}/{model}"
             return model
-        
+
         # Standard mode: auto-prefix for known providers
         spec = find_by_model(model)
         if spec and spec.litellm_prefix:
@@ -110,7 +121,7 @@ class LiteLLMProvider(LLMProvider):
         if prefix.lower().replace("-", "_") != spec_name:
             return model
         return f"{canonical_prefix}/{remainder}"
-    
+
     def _supports_cache_control(self, model: str) -> bool:
         """Return True when the provider supports cache_control on content blocks."""
         if self._gateway is not None:
@@ -153,7 +164,7 @@ class LiteLLMProvider(LLMProvider):
                 if pattern in model_lower:
                     kwargs.update(overrides)
                     return
-    
+
     @staticmethod
     def _sanitize_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Strip non-standard keys and ensure assistant messages have a content key."""
@@ -176,19 +187,20 @@ class LiteLLMProvider(LLMProvider):
     ) -> LLMResponse:
         """
         Send a chat completion request via LiteLLM.
-        
+
         Args:
             messages: List of message dicts with 'role' and 'content'.
             tools: Optional list of tool definitions in OpenAI format.
             model: Model identifier (e.g., 'anthropic/claude-sonnet-4-5').
             max_tokens: Maximum tokens in response.
             temperature: Sampling temperature.
-        
+
         Returns:
             LLMResponse with content and/or tool calls.
         """
         original_model = model or self.default_model
         model = self._resolve_model(original_model)
+        endpoint_label = normalize_endpoint_label(self.api_base or getattr(litellm, "api_base", None))
 
         if self._supports_cache_control(original_model):
             messages, tools = self._apply_cache_control(messages, tools)
@@ -196,47 +208,105 @@ class LiteLLMProvider(LLMProvider):
         # Clamp max_tokens to at least 1 — negative or zero values cause
         # LiteLLM to reject the request with "max_tokens must be at least 1".
         max_tokens = max(1, max_tokens)
-        
+
         kwargs: dict[str, Any] = {
             "model": model,
             "messages": self._sanitize_messages(messages),
             "max_tokens": max_tokens,
             "temperature": temperature,
         }
-        
+
         # Apply model-specific overrides (e.g. kimi-k2.5 temperature)
         self._apply_model_overrides(model, kwargs)
-        
+
         # Pass api_key directly — more reliable than env vars alone
         if self.api_key:
             kwargs["api_key"] = self.api_key
-        
+
         # Pass api_base for custom endpoints
         if self.api_base:
             kwargs["api_base"] = self.api_base
-        
+
         # Pass extra headers (e.g. APP-Code for AiHubMix)
         if self.extra_headers:
             kwargs["extra_headers"] = self.extra_headers
-        
+
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
-        
+
+        logger.info(
+            "LLM request: provider={} requested_model={} resolved_model={} endpoint={} messages={} tools={} temperature={} max_tokens={}",
+            self.__class__.__name__,
+            original_model,
+            model,
+            endpoint_label,
+            len(kwargs["messages"]),
+            len(tools or []),
+            temperature,
+            max_tokens,
+        )
+        logger.debug(
+            "LLM request details: endpoint={} extra_headers={} tool_names={}",
+            endpoint_label,
+            sanitize_headers(self.extra_headers),
+            [((tool.get("function") or {}).get("name") or tool.get("name") or "-") for tool in (tools or [])],
+        )
+
         try:
             response = await acompletion(**kwargs)
-            return self._parse_response(response)
+            parsed = self._parse_response(response)
+            parsed.provider_metadata = build_provider_metadata(
+                provider_name=self.__class__.__name__,
+                requested_model=original_model,
+                resolved_model=model,
+                endpoint=endpoint_label,
+            )
+            logger.info(
+                "LLM response: provider={} model={} endpoint={} finish_reason={} tool_calls={} usage={} preview={}",
+                parsed.provider_metadata["provider_name"],
+                parsed.provider_metadata["resolved_model"],
+                parsed.provider_metadata["endpoint"],
+                parsed.finish_reason,
+                len(parsed.tool_calls),
+                parsed.usage or {},
+                preview_text(parsed.content),
+            )
+            logger.debug(
+                "LLM response details: endpoint={} tool_summary={} content={} reasoning={}",
+                parsed.provider_metadata["endpoint"],
+                summarize_tool_calls(parsed.tool_calls),
+                parsed.content or "",
+                parsed.reasoning_content or "",
+            )
+            return parsed
         except Exception as e:
+            logger.error(
+                "LLM request failed: provider={} requested_model={} resolved_model={} endpoint={} error_type={} error={}",
+                self.__class__.__name__,
+                original_model,
+                model,
+                endpoint_label,
+                type(e).__name__,
+                str(e),
+            )
             # Return error as content for graceful handling
             return LLMResponse(
                 content=f"Error calling LLM: {str(e)}",
                 finish_reason="error",
+                provider_metadata=build_provider_metadata(
+                    provider_name=self.__class__.__name__,
+                    requested_model=original_model,
+                    resolved_model=model,
+                    endpoint=endpoint_label,
+                    extra={"error_type": type(e).__name__},
+                ),
             )
-    
+
     def _parse_response(self, response: Any) -> LLMResponse:
         """Parse LiteLLM response into our standard format."""
         return parse_llm_response_payload(response)
-    
+
     def get_default_model(self) -> str:
         """Get the default model."""
         return self.default_model

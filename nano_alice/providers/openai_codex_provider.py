@@ -9,9 +9,18 @@ from typing import Any, AsyncGenerator
 
 import httpx
 from loguru import logger
-
 from oauth_cli_kit import get_token as get_codex_token
-from nano_alice.providers.base import LLMProvider, LLMResponse, ToolCallRequest
+
+from nano_alice.providers.base import (
+    LLMProvider,
+    LLMResponse,
+    ToolCallRequest,
+    build_provider_metadata,
+    normalize_endpoint_label,
+    preview_text,
+    sanitize_headers,
+    summarize_tool_calls,
+)
 
 DEFAULT_CODEX_URL = "https://chatgpt.com/backend-api/codex/responses"
 DEFAULT_ORIGINATOR = "nano-alice"
@@ -40,6 +49,7 @@ class OpenAICodexProvider(LLMProvider):
         temperature: float = 0.7,
     ) -> LLMResponse:
         model = model or self.default_model
+        resolved_model = _strip_model_prefix(model)
         system_prompt, input_items = _convert_messages(messages)
 
         if self.api_key:
@@ -49,6 +59,7 @@ class OpenAICodexProvider(LLMProvider):
             token = await asyncio.to_thread(get_codex_token)
             headers = _build_oauth_headers(token.account_id, token.access)
             url = DEFAULT_CODEX_URL
+        endpoint_label = normalize_endpoint_label(url)
 
         body: dict[str, Any] = {
             "model": _strip_model_prefix(model),
@@ -66,6 +77,25 @@ class OpenAICodexProvider(LLMProvider):
         if tools:
             body["tools"] = _convert_tools(tools)
 
+        logger.info(
+            "LLM request: provider={} requested_model={} resolved_model={} endpoint={} messages={} input_items={} tools={} temperature={} max_tokens={}",
+            self.__class__.__name__,
+            model,
+            resolved_model,
+            endpoint_label,
+            len(messages),
+            len(input_items),
+            len(tools or []),
+            temperature,
+            max_tokens,
+        )
+        logger.debug(
+            "LLM request details: endpoint={} headers={} tool_names={}",
+            endpoint_label,
+            sanitize_headers(headers),
+            [tool.get("name") or ((tool.get("function") or {}).get("name")) or "-" for tool in (tools or [])],
+        )
+
         try:
             try:
                 content, tool_calls, finish_reason = await _request_codex(url, headers, body, verify=True)
@@ -74,15 +104,53 @@ class OpenAICodexProvider(LLMProvider):
                     raise
                 logger.warning("SSL certificate verification failed for Codex API; retrying with verify=False")
                 content, tool_calls, finish_reason = await _request_codex(url, headers, body, verify=False)
-            return LLMResponse(
+            response = LLMResponse(
                 content=content,
                 tool_calls=tool_calls,
                 finish_reason=finish_reason,
+                provider_metadata=build_provider_metadata(
+                    provider_name=self.__class__.__name__,
+                    requested_model=model,
+                    resolved_model=resolved_model,
+                    endpoint=endpoint_label,
+                ),
             )
+            logger.info(
+                "LLM response: provider={} model={} endpoint={} finish_reason={} tool_calls={} preview={}",
+                response.provider_metadata["provider_name"],
+                response.provider_metadata["resolved_model"],
+                response.provider_metadata["endpoint"],
+                response.finish_reason,
+                len(response.tool_calls),
+                preview_text(response.content),
+            )
+            logger.debug(
+                "LLM response details: endpoint={} tool_summary={} content={}",
+                response.provider_metadata["endpoint"],
+                summarize_tool_calls(response.tool_calls),
+                response.content or "",
+            )
+            return response
         except Exception as e:
+            logger.error(
+                "LLM request failed: provider={} requested_model={} resolved_model={} endpoint={} error_type={} error={}",
+                self.__class__.__name__,
+                model,
+                resolved_model,
+                endpoint_label,
+                type(e).__name__,
+                str(e),
+            )
             return LLMResponse(
                 content=f"Error calling Codex: {str(e)}",
                 finish_reason="error",
+                provider_metadata=build_provider_metadata(
+                    provider_name=self.__class__.__name__,
+                    requested_model=model,
+                    resolved_model=resolved_model,
+                    endpoint=endpoint_label,
+                    extra={"error_type": type(e).__name__},
+                ),
             )
 
     def get_default_model(self) -> str:
@@ -265,7 +333,7 @@ async def _iter_sse(response: httpx.Response) -> AsyncGenerator[dict[str, Any], 
     async for line in response.aiter_lines():
         if line == "":
             if buffer:
-                data_lines = [l[5:].strip() for l in buffer if l.startswith("data:")]
+                data_lines = [line_part[5:].strip() for line_part in buffer if line_part.startswith("data:")]
                 buffer = []
                 if not data_lines:
                     continue

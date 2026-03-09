@@ -40,7 +40,7 @@ from nano_alice.heartbeat.service import (
     normalize_heartbeat_response,
     parse_heartbeat_decision,
 )
-from nano_alice.providers.base import LLMProvider, LLMResponse
+from nano_alice.providers.base import LLMProvider, LLMResponse, preview_text, summarize_tool_calls
 from nano_alice.session.manager import Session, SessionManager
 
 if TYPE_CHECKING:
@@ -409,13 +409,26 @@ class AgentLoop:
             # 正常返回
             if response.finish_reason != "error":
                 usage = response.usage or {}
+                provider_meta = response.provider_metadata or {}
                 logger.info(
-                    "LLM call: model={} | {:.1f}s | prompt={} compl={} total={}",
+                    "LLM call: model={} resolved_model={} provider={} endpoint={} | {:.1f}s | prompt={} compl={} total={} | finish_reason={} | tool_calls={} | preview={}",
                     self.model,
+                    provider_meta.get("resolved_model", self.model),
+                    provider_meta.get("provider_name", type(self.provider).__name__),
+                    provider_meta.get("endpoint", "-"),
                     elapsed,
                     usage.get("prompt_tokens", 0),
                     usage.get("completion_tokens", 0),
                     usage.get("total_tokens", 0),
+                    response.finish_reason,
+                    summarize_tool_calls(response.tool_calls),
+                    preview_text(response.content),
+                )
+                logger.debug(
+                    "LLM call details: provider_meta={} content={} reasoning={}",
+                    provider_meta,
+                    response.content or "",
+                    response.reasoning_content or "",
                 )
                 return response
 
