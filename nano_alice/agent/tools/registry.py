@@ -6,6 +6,7 @@ from typing import Any
 from loguru import logger
 
 from nano_alice.agent.tools.base import Tool
+from nano_alice.logging_utils import summarize_tool_result
 
 
 class ToolRegistry:
@@ -38,7 +39,7 @@ class ToolRegistry:
         """Get all tool definitions in OpenAI format."""
         return [tool.to_schema() for tool in self._tools.values()]
     
-    async def execute(self, name: str, params: dict[str, Any]) -> str:
+    async def execute(self, name: str, params: dict[str, Any]) -> str | list:
         """
         Execute a tool by name with given parameters.
         
@@ -65,7 +66,15 @@ class ToolRegistry:
             t0 = time.perf_counter()
             result = await tool.execute(**params)
             elapsed = time.perf_counter() - t0
-            logger.debug("Tool '{}' executed in {:.2f}s, result length={}", name, elapsed, len(result))
+            summary = summarize_tool_result(name, result)
+            logger.debug(
+                "Tool '{}' executed in {:.2f}s, result_bytes={} result_kind={} preview={}",
+                name,
+                elapsed,
+                summary["result_bytes"],
+                summary["result_kind"],
+                summary["preview"],
+            )
             return result
         except Exception as e:
             logger.error("Tool '{}' raised exception: {}", name, e)

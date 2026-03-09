@@ -1,8 +1,9 @@
 """File system tools: read, write, edit."""
 
-import base64
 import difflib
+import hashlib
 import mimetypes
+import struct
 from pathlib import Path
 from typing import Any
 
@@ -33,7 +34,11 @@ class ReadFileTool(Tool):
     
     @property
     def description(self) -> str:
-        return "Read the contents of a file. For image files (jpg/png/gif/webp), returns the image for visual inspection."
+        return (
+            "Read the contents of a file. For image files (jpg/png/gif/webp), returns "
+            "image metadata and file path; provider adapters can inject the actual image "
+            "into the next model turn for visual inspection without persisting binary data in tool history."
+        )
     
     @property
     def parameters(self) -> dict[str, Any]:
@@ -61,11 +66,26 @@ class ReadFileTool(Tool):
                 size = file_path.stat().st_size
                 if size > 10 * 1024 * 1024:
                     return f"Error: Image too large ({size // 1024 // 1024}MB), max 10MB"
-                b64 = base64.b64encode(file_path.read_bytes()).decode()
-                size_kb = size / 1024
+                image_bytes = file_path.read_bytes()
+                width, height = _read_image_dimensions(image_bytes, mime)
                 return [
-                    {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
-                    {"type": "text", "text": f"Image: {file_path.name} ({size_kb:.0f}KB)"},
+                    {
+                        "type": "image_file",
+                        "path": str(file_path),
+                        "filename": file_path.name,
+                        "mime_type": mime,
+                        "size_bytes": size,
+                        "sha256": hashlib.sha256(image_bytes).hexdigest(),
+                        "width": width,
+                        "height": height,
+                    },
+                    {
+                        "type": "text",
+                        "text": (
+                            f"Image file: {file_path.name} ({size / 1024:.0f}KB)"
+                            + (f", {width}x{height}" if width and height else "")
+                        ),
+                    },
                 ]
 
             content = file_path.read_text(encoding="utf-8")
@@ -74,6 +94,69 @@ class ReadFileTool(Tool):
             return f"Error: {e}"
         except Exception as e:
             return f"Error reading file: {str(e)}"
+
+
+def _read_image_dimensions(image_bytes: bytes, mime: str) -> tuple[int | None, int | None]:
+    """Best-effort image size probe without external dependencies."""
+    try:
+        if mime == "image/png" and image_bytes.startswith(b"\x89PNG\r\n\x1a\n") and len(image_bytes) >= 24:
+            width, height = struct.unpack(">II", image_bytes[16:24])
+            return width, height
+
+        if mime == "image/gif" and image_bytes[:6] in {b"GIF87a", b"GIF89a"} and len(image_bytes) >= 10:
+            width, height = struct.unpack("<HH", image_bytes[6:10])
+            return width, height
+
+        if mime == "image/webp" and image_bytes[:4] == b"RIFF" and image_bytes[8:12] == b"WEBP":
+            return _read_webp_dimensions(image_bytes)
+
+        if mime in {"image/jpeg", "image/jpg"}:
+            return _read_jpeg_dimensions(image_bytes)
+    except Exception:
+        return None, None
+    return None, None
+
+
+def _read_jpeg_dimensions(image_bytes: bytes) -> tuple[int | None, int | None]:
+    idx = 2
+    size = len(image_bytes)
+    while idx + 9 < size:
+        if image_bytes[idx] != 0xFF:
+            idx += 1
+            continue
+        marker = image_bytes[idx + 1]
+        idx += 2
+        if marker in {0xD8, 0xD9}:
+            continue
+        if idx + 2 > size:
+            break
+        segment_length = struct.unpack(">H", image_bytes[idx:idx + 2])[0]
+        if segment_length < 2 or idx + segment_length > size:
+            break
+        if marker in {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}:
+            if idx + 7 <= size:
+                height, width = struct.unpack(">HH", image_bytes[idx + 3:idx + 7])
+                return width, height
+            break
+        idx += segment_length
+    return None, None
+
+
+def _read_webp_dimensions(image_bytes: bytes) -> tuple[int | None, int | None]:
+    chunk_header = image_bytes[12:16]
+    if chunk_header == b"VP8 " and len(image_bytes) >= 30:
+        width, height = struct.unpack("<HH", image_bytes[26:30])
+        return width & 0x3FFF, height & 0x3FFF
+    if chunk_header == b"VP8L" and len(image_bytes) >= 25:
+        bits = int.from_bytes(image_bytes[21:25], "little")
+        width = (bits & 0x3FFF) + 1
+        height = ((bits >> 14) & 0x3FFF) + 1
+        return width, height
+    if chunk_header == b"VP8X" and len(image_bytes) >= 30:
+        width = int.from_bytes(image_bytes[24:27], "little") + 1
+        height = int.from_bytes(image_bytes[27:30], "little") + 1
+        return width, height
+    return None, None
 
 
 class WriteFileTool(Tool):

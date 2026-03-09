@@ -11,6 +11,17 @@ import httpx
 from loguru import logger
 from oauth_cli_kit import get_token as get_codex_token
 
+from nano_alice.logging_utils import (
+    adapt_messages_for_visual_tool_results,
+    compact_summary,
+    extract_exception_details,
+    json_ready,
+    new_request_id,
+    payload_bytes,
+    summarize_messages,
+    summarize_tools,
+    write_trace_file,
+)
 from nano_alice.providers.base import (
     LLMProvider,
     LLMResponse,
@@ -50,6 +61,7 @@ class OpenAICodexProvider(LLMProvider):
     ) -> LLMResponse:
         model = model or self.default_model
         resolved_model = _strip_model_prefix(model)
+        messages, adaptation_summary = adapt_messages_for_visual_tool_results(messages)
         system_prompt, input_items = _convert_messages(messages)
 
         if self.api_key:
@@ -60,6 +72,7 @@ class OpenAICodexProvider(LLMProvider):
             headers = _build_oauth_headers(token.account_id, token.access)
             url = DEFAULT_CODEX_URL
         endpoint_label = normalize_endpoint_label(url)
+        request_id = new_request_id()
 
         body: dict[str, Any] = {
             "model": _strip_model_prefix(model),
@@ -77,8 +90,13 @@ class OpenAICodexProvider(LLMProvider):
         if tools:
             body["tools"] = _convert_tools(tools)
 
+        request_bytes = payload_bytes(body)
+        message_summary = summarize_messages(messages)
+        tool_schema_summary = summarize_tools(tools)
+
         logger.info(
-            "LLM request: provider={} requested_model={} resolved_model={} endpoint={} messages={} input_items={} tools={} temperature={} max_tokens={}",
+            "LLM request: request_id={} provider={} requested_model={} resolved_model={} endpoint={} messages={} input_items={} tools={} temperature={} max_tokens={} request_bytes={}",
+            request_id,
             self.__class__.__name__,
             model,
             resolved_model,
@@ -88,57 +106,126 @@ class OpenAICodexProvider(LLMProvider):
             len(tools or []),
             temperature,
             max_tokens,
+            request_bytes,
         )
         logger.debug(
-            "LLM request details: endpoint={} headers={} tool_names={}",
+            "LLM request details: request_id={} endpoint={} headers={} tool_names={} largest_messages={} largest_tools={}",
+            request_id,
             endpoint_label,
             sanitize_headers(headers),
             [tool.get("name") or ((tool.get("function") or {}).get("name")) or "-" for tool in (tools or [])],
+            compact_summary(message_summary, name_key="role"),
+            compact_summary(tool_schema_summary, name_key="name"),
         )
 
         try:
             try:
-                content, tool_calls, finish_reason = await _request_codex(url, headers, body, verify=True)
+                codex_result = await _request_codex(url, headers, body, verify=True)
             except Exception as e:
                 if "CERTIFICATE_VERIFY_FAILED" not in str(e):
                     raise
                 logger.warning("SSL certificate verification failed for Codex API; retrying with verify=False")
-                content, tool_calls, finish_reason = await _request_codex(url, headers, body, verify=False)
+                codex_result = await _request_codex(url, headers, body, verify=False)
+            response_bytes = len(codex_result["raw_response"].encode("utf-8"))
             response = LLMResponse(
-                content=content,
-                tool_calls=tool_calls,
-                finish_reason=finish_reason,
+                content=codex_result["content"],
+                tool_calls=codex_result["tool_calls"],
+                finish_reason=codex_result["finish_reason"],
                 provider_metadata=build_provider_metadata(
                     provider_name=self.__class__.__name__,
                     requested_model=model,
                     resolved_model=resolved_model,
                     endpoint=endpoint_label,
+                    extra={
+                        "request_id": request_id,
+                        "request_bytes": request_bytes,
+                        "response_bytes": response_bytes,
+                    },
                 ),
             )
+            trace_path, trace_error = write_trace_file(
+                "providers",
+                self.__class__.__name__,
+                request_id,
+                {
+                    "request_id": request_id,
+                    "provider": self.__class__.__name__,
+                    "requested_model": model,
+                    "resolved_model": resolved_model,
+                    "endpoint": endpoint_label,
+                    "request_headers": sanitize_headers(headers),
+                    "request_body": body,
+                    "request_summary": {
+                        "request_bytes": request_bytes,
+                        "messages": message_summary,
+                        "tools": tool_schema_summary,
+                        "message_adaptation": adaptation_summary,
+                    },
+                    "raw_response": codex_result["raw_response"],
+                    "response_headers": codex_result["response_headers"],
+                    "response_status_code": codex_result["status_code"],
+                    "raw_response_bytes": response_bytes,
+                    "parsed_response": json_ready(response),
+                },
+            )
+            response.provider_metadata["trace_path"] = trace_path
+            response.provider_metadata["trace_error"] = trace_error
+            if trace_error:
+                logger.warning("Trace unavailable for request_id={}: {}", request_id, trace_error)
             logger.info(
-                "LLM response: provider={} model={} endpoint={} finish_reason={} tool_calls={} preview={}",
+                "LLM response: request_id={} provider={} model={} endpoint={} finish_reason={} tool_calls={} response_bytes={} trace={} preview={}",
+                request_id,
                 response.provider_metadata["provider_name"],
                 response.provider_metadata["resolved_model"],
                 response.provider_metadata["endpoint"],
                 response.finish_reason,
                 len(response.tool_calls),
+                response_bytes,
+                trace_path,
                 preview_text(response.content),
             )
             logger.debug(
-                "LLM response details: endpoint={} tool_summary={} content={}",
+                "LLM response details: request_id={} endpoint={} tool_summary={} content={}",
+                request_id,
                 response.provider_metadata["endpoint"],
                 summarize_tool_calls(response.tool_calls),
                 response.content or "",
             )
             return response
         except Exception as e:
+            trace_path, trace_error = write_trace_file(
+                "providers",
+                self.__class__.__name__,
+                request_id,
+                {
+                    "request_id": request_id,
+                    "provider": self.__class__.__name__,
+                    "requested_model": model,
+                    "resolved_model": resolved_model,
+                    "endpoint": endpoint_label,
+                    "request_headers": sanitize_headers(headers),
+                    "request_body": body,
+                    "request_summary": {
+                        "request_bytes": request_bytes,
+                        "messages": message_summary,
+                        "tools": tool_schema_summary,
+                        "message_adaptation": adaptation_summary,
+                    },
+                    "error": extract_exception_details(e),
+                },
+            )
+            if trace_error:
+                logger.warning("Trace unavailable for request_id={}: {}", request_id, trace_error)
             logger.error(
-                "LLM request failed: provider={} requested_model={} resolved_model={} endpoint={} error_type={} error={}",
+                "LLM request failed: request_id={} provider={} requested_model={} resolved_model={} endpoint={} request_bytes={} error_type={} trace={} error={}",
+                request_id,
                 self.__class__.__name__,
                 model,
                 resolved_model,
                 endpoint_label,
+                request_bytes,
                 type(e).__name__,
+                trace_path,
                 str(e),
             )
             return LLMResponse(
@@ -149,7 +236,13 @@ class OpenAICodexProvider(LLMProvider):
                     requested_model=model,
                     resolved_model=resolved_model,
                     endpoint=endpoint_label,
-                    extra={"error_type": type(e).__name__},
+                    extra={
+                        "error_type": type(e).__name__,
+                        "request_id": request_id,
+                        "request_bytes": request_bytes,
+                        "trace_path": trace_path,
+                        "trace_error": trace_error,
+                    },
                 ),
             )
 
@@ -208,13 +301,21 @@ async def _request_codex(
     headers: dict[str, str],
     body: dict[str, Any],
     verify: bool,
-) -> tuple[str, list[ToolCallRequest], str]:
+) -> dict[str, Any]:
     async with httpx.AsyncClient(timeout=60.0, verify=verify) as client:
         async with client.stream("POST", url, headers=headers, json=body) as response:
             if response.status_code != 200:
                 text = await response.aread()
                 raise RuntimeError(_friendly_error(response.status_code, text.decode("utf-8", "ignore")))
-            return await _consume_sse(response)
+            content, tool_calls, finish_reason, raw_response = await _consume_sse(response)
+            return {
+                "content": content,
+                "tool_calls": tool_calls,
+                "finish_reason": finish_reason,
+                "raw_response": raw_response,
+                "status_code": response.status_code,
+                "response_headers": sanitize_headers(dict(response.headers)),
+            }
 
 
 def _convert_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -348,13 +449,15 @@ async def _iter_sse(response: httpx.Response) -> AsyncGenerator[dict[str, Any], 
         buffer.append(line)
 
 
-async def _consume_sse(response: httpx.Response) -> tuple[str, list[ToolCallRequest], str]:
+async def _consume_sse(response: httpx.Response) -> tuple[str, list[ToolCallRequest], str, str]:
     content = ""
     tool_calls: list[ToolCallRequest] = []
     tool_call_buffers: dict[str, dict[str, Any]] = {}
     finish_reason = "stop"
+    raw_events: list[str] = []
 
     async for event in _iter_sse(response):
+        raw_events.append(json.dumps(event, ensure_ascii=False))
         event_type = event.get("type")
         if event_type == "response.output_item.added":
             item = event.get("item") or {}
@@ -402,7 +505,7 @@ async def _consume_sse(response: httpx.Response) -> tuple[str, list[ToolCallRequ
         elif event_type in {"error", "response.failed"}:
             raise RuntimeError("Codex response failed")
 
-    return content, tool_calls, finish_reason
+    return content, tool_calls, finish_reason, "\n".join(raw_events)
 
 
 _FINISH_REASON_MAP = {"completed": "stop", "incomplete": "length", "failed": "error", "cancelled": "error"}

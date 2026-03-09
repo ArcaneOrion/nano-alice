@@ -75,8 +75,10 @@ class RotatingProvider(LLMProvider):
             if primary_response.finish_reason != "error":
                 return primary_response
             logger.warning(
-                "Primary endpoint failed, switching to fallback pool: primary={} error={}",
+                "Primary endpoint failed, switching to fallback pool: primary={} request_id={} trace={} error={}",
                 self._provider_label(self.primary_provider),
+                (primary_response.provider_metadata or {}).get("request_id", "-"),
+                (primary_response.provider_metadata or {}).get("trace_path", "-"),
                 (primary_response.content or "")[:200],
             )
             return await self._try_fallbacks(
@@ -145,9 +147,11 @@ class RotatingProvider(LLMProvider):
                 )
                 return fallback_response
             logger.warning(
-                "Endpoint pool fallback failed: index={} provider={} error={}",
+                "Endpoint pool fallback failed: index={} provider={} request_id={} trace={} error={}",
                 index,
                 self._provider_label(self.fallback_providers[index]),
+                (fallback_response.provider_metadata or {}).get("request_id", "-"),
+                (fallback_response.provider_metadata or {}).get("trace_path", "-"),
                 (fallback_response.content or "")[:200],
             )
             last_error = fallback_response

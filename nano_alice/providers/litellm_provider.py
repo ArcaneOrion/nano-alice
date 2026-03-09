@@ -5,6 +5,17 @@ from typing import Any
 
 from loguru import logger
 
+from nano_alice.logging_utils import (
+    adapt_messages_for_visual_tool_results,
+    compact_summary,
+    extract_exception_details,
+    json_ready,
+    new_request_id,
+    payload_bytes,
+    summarize_messages,
+    summarize_tools,
+    write_trace_file,
+)
 from nano_alice.providers.base import (
     LLMProvider,
     LLMResponse,
@@ -205,6 +216,8 @@ class LiteLLMProvider(LLMProvider):
         if self._supports_cache_control(original_model):
             messages, tools = self._apply_cache_control(messages, tools)
 
+        messages, adaptation_summary = adapt_messages_for_visual_tool_results(messages)
+
         # Clamp max_tokens to at least 1 — negative or zero values cause
         # LiteLLM to reject the request with "max_tokens must be at least 1".
         max_tokens = max(1, max_tokens)
@@ -235,8 +248,23 @@ class LiteLLMProvider(LLMProvider):
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
 
+        request_id = new_request_id()
+        request_body = {
+            "model": kwargs["model"],
+            "messages": kwargs["messages"],
+            "max_tokens": kwargs["max_tokens"],
+            "temperature": kwargs["temperature"],
+        }
+        if tools:
+            request_body["tools"] = tools
+            request_body["tool_choice"] = "auto"
+        request_bytes = payload_bytes(request_body)
+        message_summary = summarize_messages(kwargs["messages"])
+        tool_schema_summary = summarize_tools(tools)
+
         logger.info(
-            "LLM request: provider={} requested_model={} resolved_model={} endpoint={} messages={} tools={} temperature={} max_tokens={}",
+            "LLM request: request_id={} provider={} requested_model={} resolved_model={} endpoint={} messages={} tools={} temperature={} max_tokens={} request_bytes={}",
+            request_id,
             self.__class__.__name__,
             original_model,
             model,
@@ -245,35 +273,77 @@ class LiteLLMProvider(LLMProvider):
             len(tools or []),
             temperature,
             max_tokens,
+            request_bytes,
         )
         logger.debug(
-            "LLM request details: endpoint={} extra_headers={} tool_names={}",
+            "LLM request details: request_id={} endpoint={} extra_headers={} tool_names={} largest_messages={} largest_tools={}",
+            request_id,
             endpoint_label,
             sanitize_headers(self.extra_headers),
             [((tool.get("function") or {}).get("name") or tool.get("name") or "-") for tool in (tools or [])],
+            compact_summary(message_summary, name_key="role"),
+            compact_summary(tool_schema_summary, name_key="name"),
         )
 
         try:
             response = await acompletion(**kwargs)
+            raw_response = json_ready(response)
+            response_bytes = payload_bytes(raw_response)
             parsed = self._parse_response(response)
+            trace_path, trace_error = write_trace_file(
+                "providers",
+                self.__class__.__name__,
+                request_id,
+                {
+                    "request_id": request_id,
+                    "provider": self.__class__.__name__,
+                    "requested_model": original_model,
+                    "resolved_model": model,
+                    "endpoint": endpoint_label,
+                    "request_headers": sanitize_headers(self.extra_headers),
+                    "request_body": request_body,
+                    "request_summary": {
+                        "request_bytes": request_bytes,
+                        "messages": message_summary,
+                        "tools": tool_schema_summary,
+                        "message_adaptation": adaptation_summary,
+                    },
+                    "raw_response": raw_response,
+                    "raw_response_bytes": response_bytes,
+                    "parsed_response": json_ready(parsed),
+                },
+            )
             parsed.provider_metadata = build_provider_metadata(
                 provider_name=self.__class__.__name__,
                 requested_model=original_model,
                 resolved_model=model,
                 endpoint=endpoint_label,
+                extra={
+                    "request_id": request_id,
+                    "request_bytes": request_bytes,
+                    "response_bytes": response_bytes,
+                    "trace_path": trace_path,
+                    "trace_error": trace_error,
+                },
             )
+            if trace_error:
+                logger.warning("Trace unavailable for request_id={}: {}", request_id, trace_error)
             logger.info(
-                "LLM response: provider={} model={} endpoint={} finish_reason={} tool_calls={} usage={} preview={}",
+                "LLM response: request_id={} provider={} model={} endpoint={} finish_reason={} tool_calls={} usage={} response_bytes={} trace={} preview={}",
+                request_id,
                 parsed.provider_metadata["provider_name"],
                 parsed.provider_metadata["resolved_model"],
                 parsed.provider_metadata["endpoint"],
                 parsed.finish_reason,
                 len(parsed.tool_calls),
                 parsed.usage or {},
+                response_bytes,
+                trace_path,
                 preview_text(parsed.content),
             )
             logger.debug(
-                "LLM response details: endpoint={} tool_summary={} content={} reasoning={}",
+                "LLM response details: request_id={} endpoint={} tool_summary={} content={} reasoning={}",
+                request_id,
                 parsed.provider_metadata["endpoint"],
                 summarize_tool_calls(parsed.tool_calls),
                 parsed.content or "",
@@ -281,13 +351,40 @@ class LiteLLMProvider(LLMProvider):
             )
             return parsed
         except Exception as e:
+            error_details = extract_exception_details(e)
+            trace_path, trace_error = write_trace_file(
+                "providers",
+                self.__class__.__name__,
+                request_id,
+                {
+                    "request_id": request_id,
+                    "provider": self.__class__.__name__,
+                    "requested_model": original_model,
+                    "resolved_model": model,
+                    "endpoint": endpoint_label,
+                    "request_headers": sanitize_headers(self.extra_headers),
+                    "request_body": request_body,
+                    "request_summary": {
+                        "request_bytes": request_bytes,
+                        "messages": message_summary,
+                        "tools": tool_schema_summary,
+                        "message_adaptation": adaptation_summary,
+                    },
+                    "error": error_details,
+                },
+            )
+            if trace_error:
+                logger.warning("Trace unavailable for request_id={}: {}", request_id, trace_error)
             logger.error(
-                "LLM request failed: provider={} requested_model={} resolved_model={} endpoint={} error_type={} error={}",
+                "LLM request failed: request_id={} provider={} requested_model={} resolved_model={} endpoint={} request_bytes={} error_type={} trace={} error={}",
+                request_id,
                 self.__class__.__name__,
                 original_model,
                 model,
                 endpoint_label,
+                request_bytes,
                 type(e).__name__,
+                trace_path,
                 str(e),
             )
             # Return error as content for graceful handling
@@ -299,7 +396,13 @@ class LiteLLMProvider(LLMProvider):
                     requested_model=original_model,
                     resolved_model=model,
                     endpoint=endpoint_label,
-                    extra={"error_type": type(e).__name__},
+                    extra={
+                        "error_type": type(e).__name__,
+                        "request_id": request_id,
+                        "request_bytes": request_bytes,
+                        "trace_path": trace_path,
+                        "trace_error": trace_error,
+                    },
                 ),
             )
 

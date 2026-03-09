@@ -119,10 +119,19 @@ def sanitize_headers(headers: dict[str, str] | None) -> dict[str, str]:
     if not headers:
         return {}
 
+    sensitive = {
+        "authorization",
+        "proxy-authorization",
+        "x-api-key",
+        "api-key",
+        "cookie",
+        "set-cookie",
+        "chatgpt-account-id",
+    }
     redacted: dict[str, str] = {}
     for key, value in headers.items():
         lowered = key.lower()
-        if lowered in {"authorization", "proxy-authorization", "x-api-key", "api-key"}:
+        if lowered in sensitive:
             redacted[key] = "***"
         else:
             redacted[key] = value

@@ -40,6 +40,7 @@ from nano_alice.heartbeat.service import (
     normalize_heartbeat_response,
     parse_heartbeat_decision,
 )
+from nano_alice.logging_utils import summarize_tool_result
 from nano_alice.providers.base import LLMProvider, LLMResponse, preview_text, summarize_tool_calls
 from nano_alice.session.manager import Session, SessionManager
 
@@ -411,11 +412,13 @@ class AgentLoop:
                 usage = response.usage or {}
                 provider_meta = response.provider_metadata or {}
                 logger.info(
-                    "LLM call: model={} resolved_model={} provider={} endpoint={} | {:.1f}s | prompt={} compl={} total={} | finish_reason={} | tool_calls={} | preview={}",
+                    "LLM call: request_id={} model={} resolved_model={} provider={} endpoint={} trace={} | {:.1f}s | prompt={} compl={} total={} | finish_reason={} | tool_calls={} | preview={}",
+                    provider_meta.get("request_id", "-"),
                     self.model,
                     provider_meta.get("resolved_model", self.model),
                     provider_meta.get("provider_name", type(self.provider).__name__),
                     provider_meta.get("endpoint", "-"),
+                    provider_meta.get("trace_path", "-"),
                     elapsed,
                     usage.get("prompt_tokens", 0),
                     usage.get("completion_tokens", 0),
@@ -515,6 +518,14 @@ class AgentLoop:
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.info("Tool call: {}({})", tool_call.name, args_str[:200])
                     result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                    result_summary = summarize_tool_result(tool_call.name, result)
+                    logger.info(
+                        "Tool result: {} bytes={} kind={} preview={}",
+                        tool_call.name,
+                        result_summary["result_bytes"],
+                        result_summary["result_kind"],
+                        result_summary["preview"],
+                    )
                     result_preview = (
                         result
                         if isinstance(result, str)

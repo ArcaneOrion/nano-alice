@@ -11,6 +11,7 @@ from loguru import logger
 
 from nano_alice.agent.memory import MemoryStore
 from nano_alice.agent.skills import SkillsLoader
+from nano_alice.logging_utils import payload_bytes, summarize_tool_result
 
 
 @dataclass
@@ -284,6 +285,23 @@ To recall past events, grep {workspace_path}/memory/HISTORY.md"""
         result: str | list,
     ) -> list[dict[str, Any]]:
         """Add a tool result to the message list."""
+        summary = summarize_tool_result(tool_name, result)
+        logger.debug(
+            "add_tool_result: tool={} tool_call_id={} result_bytes={} result_kind={} message_bytes={} preview={}",
+            tool_name,
+            tool_call_id,
+            summary["result_bytes"],
+            summary["result_kind"],
+            payload_bytes(
+                {
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "name": tool_name,
+                    "content": result,
+                }
+            ),
+            summary["preview"],
+        )
         messages.append({
             "role": "tool",
             "tool_call_id": tool_call_id,
