@@ -7,6 +7,7 @@ import pytest
 
 from nano_alice.agent.loop import AgentLoop
 from nano_alice.bus.queue import MessageBus
+from nano_alice.channels import feishu as channel_module
 from nano_alice.channels.feishu import FeishuChannel
 from nano_alice.channels.manager import ChannelManager
 from nano_alice.config.schema import Config, FeishuConfig, MemoryAgentConfig
@@ -352,5 +353,52 @@ def test_feishu_end_to_end_conversation_flow_updates_delivery_receipt(
                 await dispatch_task
             except asyncio.CancelledError:
                 pass
+
+    asyncio.run(scenario())
+
+
+def test_feishu_stop_falls_back_to_internal_disconnect_when_sdk_has_no_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        bus = MessageBus()
+        channel = FeishuChannel(FeishuConfig(), bus)
+        disconnected = asyncio.Event()
+        joined = []
+
+        class FakeWsClient:
+            async def _disconnect(self) -> None:
+                disconnected.set()
+
+        class FakeThread:
+            def __init__(self) -> None:
+                self._alive = True
+
+            def is_alive(self) -> bool:
+                return self._alive
+
+            def join(self, timeout: float | None = None) -> None:
+                joined.append(timeout)
+                self._alive = False
+
+        channel._ws_client = FakeWsClient()
+        channel._ws_thread = FakeThread()
+
+        async def fake_to_thread(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        monkeypatch.setattr(channel_module.asyncio, "to_thread", fake_to_thread)
+
+        original_loop = getattr(channel_module.lark.ws.client, "loop", None)
+        fake_loop = SimpleNamespace(is_running=lambda: False)
+        channel_module.lark.ws.client.loop = fake_loop
+        try:
+            await channel.stop()
+        finally:
+            channel_module.lark.ws.client.loop = original_loop
+
+        assert disconnected.is_set()
+        assert joined == [5.0]
+        assert not channel._ws_thread.is_alive()
 
     asyncio.run(scenario())

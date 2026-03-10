@@ -5,6 +5,7 @@ import json
 import os
 import re
 import threading
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any
@@ -319,10 +320,40 @@ class FeishuChannel(BaseChannel):
         self._running = False
         if self._ws_client:
             try:
-                self._ws_client.stop()
+                stop = getattr(self._ws_client, "stop", None)
+                if callable(stop):
+                    stop()
+                else:
+                    await self._disconnect_ws_client()
             except Exception as e:
                 logger.warning("Error stopping WebSocket client: {}", e)
+        if self._ws_thread and self._ws_thread.is_alive():
+            await asyncio.to_thread(self._ws_thread.join, 5.0)
+            if self._ws_thread.is_alive():
+                logger.warning("Feishu WebSocket thread did not exit within timeout")
         logger.info("Feishu bot stopped")
+
+    async def _disconnect_ws_client(self) -> None:
+        """Disconnect SDK websocket client across SDK versions that lack a public stop()."""
+        disconnect = getattr(self._ws_client, "_disconnect", None)
+        if not callable(disconnect):
+            return
+        try:
+            ws_loop = getattr(lark.ws.client, "loop", None)
+        except Exception:
+            ws_loop = None
+
+        if ws_loop and ws_loop.is_running():
+            future = asyncio.run_coroutine_threadsafe(disconnect(), ws_loop)
+            try:
+                await asyncio.wait_for(asyncio.wrap_future(future), timeout=5.0)
+            except FutureTimeoutError:
+                logger.warning("Timed out waiting for Feishu WebSocket disconnect")
+            except asyncio.TimeoutError:
+                logger.warning("Timed out waiting for Feishu WebSocket disconnect")
+            return
+
+        await disconnect()
     
     def _add_reaction_sync(self, message_id: str, emoji_type: str) -> None:
         """Sync helper for adding reaction (runs in thread pool)."""
