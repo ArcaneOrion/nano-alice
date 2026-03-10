@@ -486,6 +486,45 @@ def test_autorun_continuation_chain_runs_to_completion(tmp_path: Path) -> None:
     assert loop.task_states.load_active("cli:direct") is None
 
 
+def test_autorun_continuation_chain_returns_final_outbound_for_feishu(tmp_path: Path) -> None:
+    workspace = _make_workspace(tmp_path)
+    bus = MessageBus()
+    provider = SequencedAutorunProvider()
+    loop = AgentLoop(
+        bus=bus,
+        provider=provider,
+        workspace=workspace,
+        session_manager=SessionManager(workspace),
+        memory_agent_config=MemoryAgentConfig(enabled=False),
+    )
+
+    first_response = asyncio.run(
+        loop._process_message(
+            InboundMessage(
+                channel="feishu",
+                sender_id="user",
+                chat_id="ou_user_1",
+                content="请帮我实现任务状态",
+            ),
+            session_key="feishu:ou_user_1",
+        )
+    )
+
+    assert first_response is None
+    second_turn = asyncio.run(bus.consume_inbound())
+    second_response = asyncio.run(loop._process_message(second_turn))
+    assert second_response is None
+
+    third_turn = asyncio.run(bus.consume_inbound())
+    final_response = asyncio.run(loop._process_message(third_turn))
+
+    assert final_response is not None
+    assert final_response.channel == "feishu"
+    assert final_response.chat_id == "ou_user_1"
+    assert final_response.content == "已完成当前步骤：步骤3。"
+    assert loop.task_states.load_active("feishu:ou_user_1") is None
+
+
 def test_subagent_result_resumes_waiting_step_and_autoruns(tmp_path: Path) -> None:
     workspace = _make_workspace(tmp_path)
     bus = MessageBus()
@@ -548,6 +587,101 @@ def test_subagent_result_resumes_waiting_step_and_autoruns(tmp_path: Path) -> No
     scheduled = asyncio.run(bus.consume_inbound())
     assert scheduled.metadata["_task_continue"] is True
     assert scheduled.metadata["_task_id"] == task.task_id
+
+
+def test_completed_dirty_active_task_is_archived_before_new_user_turn(tmp_path: Path) -> None:
+    workspace = _make_workspace(tmp_path)
+    bus = MessageBus()
+    provider = AutorunProvider()
+    loop = AgentLoop(
+        bus=bus,
+        provider=provider,
+        workspace=workspace,
+        session_manager=SessionManager(workspace),
+        memory_agent_config=MemoryAgentConfig(enabled=False),
+    )
+
+    task = loop.task_states.create_new_task("feishu:direct", "旧任务")
+    task.phase = "waiting_subagent"
+    task.status = "active"
+    task.steps = build_steps(["分析需求", "实现状态"])
+    for step in task.steps:
+        step.status = "done"
+    task.pending_subagent_ids = ["sg-001"]
+    task.waiting_reason = "waiting for subagent sg-001"
+    sync_task_pointers(task)
+    loop.task_states.save_active(task)
+
+    response = asyncio.run(
+        loop._process_message(
+            InboundMessage(
+                channel="feishu",
+                sender_id="user",
+                chat_id="direct",
+                content="请帮我实现任务状态",
+            ),
+            session_key="feishu:direct",
+        )
+    )
+
+    assert response is None
+    archived = list((workspace / "task_state" / "archive").glob("feishu_direct__*.json"))
+    assert len(archived) == 1
+    assert archived[0].read_text(encoding="utf-8").find('"phase": "completed"') != -1
+
+    loaded = loop.task_states.load_active("feishu:direct")
+    assert loaded is not None
+    assert loaded.phase == "executing"
+    assert loaded.current_step_index == 2
+    assert bus.inbound_size == 1
+
+
+def test_completed_dirty_active_task_ignores_stale_subagent_result(tmp_path: Path) -> None:
+    workspace = _make_workspace(tmp_path)
+    bus = MessageBus()
+    provider = AutorunProvider()
+    loop = AgentLoop(
+        bus=bus,
+        provider=provider,
+        workspace=workspace,
+        session_manager=SessionManager(workspace),
+        memory_agent_config=MemoryAgentConfig(enabled=False),
+    )
+
+    task = loop.task_states.create_new_task("cli:direct", "实现任务状态")
+    task.phase = "waiting_subagent"
+    task.status = "active"
+    task.steps = build_steps(["分析需求", "实现状态"])
+    for step in task.steps:
+        step.status = "done"
+    task.pending_subagent_ids = ["sg-001"]
+    task.waiting_reason = "waiting for subagent sg-001"
+    sync_task_pointers(task)
+    loop.task_states.save_active(task)
+
+    response = asyncio.run(
+        loop._process_message(
+            InboundMessage(
+                channel="system",
+                sender_id="subagent",
+                chat_id="cli:direct",
+                content="后台任务结果",
+                metadata={
+                    "_task_id": task.task_id,
+                    "_subagent_result": True,
+                    "_subagent_task_id": "sg-001",
+                    "_subagent_status": "ok",
+                    "_silent": True,
+                    "_session_key": "cli:direct",
+                },
+            )
+        )
+    )
+
+    assert response is None
+    assert loop.task_states.load_active("cli:direct") is None
+    archived = list((workspace / "task_state" / "archive").glob("cli_direct__*.json"))
+    assert len(archived) == 1
 
 
 def test_extract_spawn_result_supports_structured_payload() -> None:

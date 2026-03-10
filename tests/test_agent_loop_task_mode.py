@@ -65,6 +65,7 @@ def test_process_direct_creates_task_state_and_injects_xml(tmp_path: Path) -> No
             ),
             session_key="cli:direct",
             on_progress=None,
+            direct_return_required=True,
         )
     )
 

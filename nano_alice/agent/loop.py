@@ -25,6 +25,7 @@ from nano_alice.agent.task_state import (
     TaskStateStore,
     build_steps,
     extract_plan_from_text,
+    normalize_task_state,
     sync_task_pointers,
 )
 from nano_alice.agent.tools.cron import CronTool
@@ -110,6 +111,7 @@ class AgentLoop:
         embeddings_config: EmbeddingsConfig | None = None,
         memory_agent_config: MemoryAgentConfig | None = None,
         memory_provider: LLMProvider | None = None,
+        subagent_provider: LLMProvider | None = None,
     ):
         from nano_alice.config.schema import ExecToolConfig
 
@@ -139,10 +141,10 @@ class AgentLoop:
         self.task_renderer = TaskStateRenderer()
         self.tools = ToolRegistry()
         self.subagents = SubagentManager(
-            provider=provider,
+            provider=subagent_provider or provider,
             workspace=workspace,
             bus=bus,
-            model=self.model,
+            model=subagent_provider.get_default_model() if subagent_provider else self.model,
             temperature=self.temperature,
             max_tokens=self.max_tokens,
             brave_api_key=brave_api_key,
@@ -356,6 +358,36 @@ class AgentLoop:
     @staticmethod
     def _get_next_step(task_state: TaskState, current_index: int):
         return next((step for step in task_state.steps if step.index == current_index + 1), None)
+
+    def _normalize_task_state(
+        self,
+        task_state: TaskState | None,
+        *,
+        archive_completed: bool = False,
+        context: str = "runtime",
+    ) -> TaskState | None:
+        if task_state is None:
+            return None
+        task_state, changed, reasons = normalize_task_state(task_state)
+        if changed:
+            logger.warning(
+                "Normalized task state: task_id={} context={} phase={} status={} reasons={}",
+                task_state.task_id,
+                context,
+                task_state.phase,
+                task_state.status,
+                ",".join(reasons) or "-",
+            )
+            self.task_states.save_active(task_state)
+        if archive_completed and task_state.phase == "completed":
+            self.task_states.archive_active(task_state.session_key)
+            logger.info(
+                "Archived completed task during normalization: task_id={} context={}",
+                task_state.task_id,
+                context,
+            )
+            return None
+        return task_state
 
     def _mark_step_waiting_subagent(
         self,
@@ -1070,6 +1102,13 @@ class AgentLoop:
                 message_tool.start_turn()
 
         active_task = self.task_states.load_active(session.key)
+        active_task = self._normalize_task_state(active_task, context="load_active")
+        if active_task is not None and active_task.phase == "completed":
+            self.task_states.archive_active(session.key)
+            if internal_task_event:
+                logger.info("Ignoring internal task event for completed task: {}", active_task.task_id)
+                return None
+            active_task = None
         if internal_task_event and active_task is None:
             logger.info("Ignoring internal task event without active task: {}", msg.sender_id)
             return None
@@ -1095,6 +1134,7 @@ class AgentLoop:
             )
             if active_task is None and forced_response is None:
                 return None
+            active_task = self._normalize_task_state(active_task, context="post_subagent_result")
         route = self.task_router.decide(msg.content, active_task=active_task)
         task_state = self._maybe_start_task(session.key, msg, active_task, route)
         if task_state and task_state.phase in {"planning", "replanning"}:
@@ -1209,6 +1249,7 @@ class AgentLoop:
             task_state = self._complete_current_step(task_state, final_content, task_evidence)
             if previous_step_index is not None:
                 step_finished = task_state is None or task_state.current_step_index != previous_step_index
+        task_state = self._normalize_task_state(task_state, context="post_step")
 
         if not internal_task_event:
             session.add_message("user", msg.content, media=msg.media if msg.media else None)
@@ -1280,6 +1321,9 @@ class AgentLoop:
             )
             if continuation_scheduled:
                 meta["continuation_scheduled"] = True
+
+        if task_state is not None and task_state.phase == "completed":
+            self.task_states.archive_active(task_state.session_key)
 
         # Message tool was used to send the response to the user via bus.
         # For bus-driven channels (Telegram, Discord, etc.), the message is already sent

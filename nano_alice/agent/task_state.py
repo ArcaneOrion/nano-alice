@@ -161,7 +161,11 @@ class TaskStateStore:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError, TypeError, ValueError):
             return None
-        return TaskState.from_dict(data)
+        task_state = TaskState.from_dict(data)
+        task_state, changed, _ = normalize_task_state(task_state)
+        if changed:
+            self.save_active(task_state)
+        return task_state
 
     def save_active(self, task_state: TaskState) -> None:
         task_state.updated_at = datetime.now().isoformat(timespec="seconds")
@@ -339,3 +343,154 @@ def sync_task_pointers(task_state: TaskState) -> TaskState:
     next_step = next((step for step in task_state.steps if step.index == current.index + 1), None)
     task_state.next_step_id = next_step.id if next_step else ""
     return task_state
+
+
+def normalize_task_state(task_state: TaskState) -> tuple[TaskState, bool, list[str]]:
+    """Normalize task state persisted on disk back into a legal combination."""
+    changed = False
+    reasons: list[str] = []
+
+    def mark(reason: str) -> None:
+        nonlocal changed
+        changed = True
+        if reason not in reasons:
+            reasons.append(reason)
+
+    waiting_steps = [step for step in task_state.steps if step.status == "waiting"]
+    in_progress_steps = [step for step in task_state.steps if step.status == "in_progress"]
+    pending_steps = [step for step in task_state.steps if step.status == "pending"]
+    blocked_steps = [step for step in task_state.steps if step.status == "blocked"]
+    failed_steps = [step for step in task_state.steps if step.status == "failed"]
+    done_steps = [step for step in task_state.steps if step.status == "done"]
+    all_done = bool(task_state.steps) and len(done_steps) == len(task_state.steps)
+    has_failed_or_blocked_steps = bool(blocked_steps or failed_steps)
+
+    derived_pending_ids: list[str] = []
+    for step in waiting_steps:
+        if step.spawn_task_id and step.spawn_task_id not in derived_pending_ids:
+            derived_pending_ids.append(step.spawn_task_id)
+
+    if waiting_steps and task_state.pending_subagent_ids != derived_pending_ids:
+        task_state.pending_subagent_ids = derived_pending_ids
+        mark("pending_subagent_ids_synced")
+
+    if all_done:
+        if task_state.phase != "completed":
+            task_state.phase = "completed"
+            mark("phase_completed")
+        if task_state.status != "done":
+            task_state.status = "done"
+            mark("status_done")
+        if task_state.pending_subagent_ids:
+            task_state.pending_subagent_ids = []
+            mark("cleared_pending_subagents")
+        if task_state.waiting_reason:
+            task_state.waiting_reason = ""
+            mark("cleared_waiting_reason")
+        if task_state.continuation_scheduled:
+            task_state.continuation_scheduled = False
+            mark("cleared_continuation")
+        if task_state.steps:
+            last_step = task_state.steps[-1]
+            if task_state.current_step_index != last_step.index:
+                task_state.current_step_index = last_step.index
+                mark("current_step_index_repaired")
+            if task_state.current_step_id != last_step.id:
+                task_state.current_step_id = last_step.id
+                mark("current_step_id_repaired")
+        if task_state.next_step_id:
+            task_state.next_step_id = ""
+            mark("cleared_next_step_id")
+        return task_state, changed, reasons
+
+    if task_state.status == "done":
+        task_state.status = "active"
+        mark("reactivated_incomplete_task")
+
+    if task_state.phase == "completed":
+        task_state.phase = "blocked" if has_failed_or_blocked_steps else "executing"
+        if task_state.continuation_scheduled:
+            task_state.continuation_scheduled = False
+            mark("cleared_continuation")
+        if task_state.phase == "blocked" and not task_state.waiting_reason:
+            task_state.waiting_reason = "任务包含失败或阻塞步骤，等待进一步处理。"
+            mark("restored_blocked_reason")
+        mark("reopened_incomplete_task")
+
+    if task_state.phase == "waiting_subagent":
+        if not waiting_steps:
+            task_state.phase = "blocked" if blocked_steps or failed_steps else "executing"
+            if task_state.waiting_reason:
+                task_state.waiting_reason = ""
+                mark("cleared_waiting_reason")
+            if task_state.pending_subagent_ids:
+                task_state.pending_subagent_ids = []
+                mark("cleared_pending_subagents")
+            if task_state.continuation_scheduled:
+                task_state.continuation_scheduled = False
+                mark("cleared_continuation")
+            if task_state.phase == "blocked" and not task_state.waiting_reason:
+                task_state.waiting_reason = "任务包含失败或阻塞步骤，等待进一步处理。"
+                mark("restored_blocked_reason")
+            mark("recovered_from_orphan_waiting_phase")
+        elif not task_state.pending_subagent_ids:
+            if derived_pending_ids:
+                task_state.pending_subagent_ids = derived_pending_ids
+                mark("reconstructed_pending_subagents")
+            else:
+                task_state.phase = "blocked"
+                task_state.waiting_reason = "任务等待子代理结果，但缺少有效的子代理 ID。"
+                mark("blocked_invalid_waiting_state")
+
+    has_valid_waiting_subagents = bool(derived_pending_ids)
+
+    if waiting_steps and task_state.phase != "waiting_subagent":
+        if has_valid_waiting_subagents:
+            task_state.phase = "waiting_subagent"
+            mark("phase_waiting_subagent")
+        else:
+            task_state.phase = "blocked"
+            task_state.waiting_reason = "任务存在 waiting 步骤，但缺少有效的子代理 ID。"
+            mark("blocked_invalid_waiting_state")
+
+    if task_state.phase != "waiting_subagent":
+        if task_state.pending_subagent_ids:
+            task_state.pending_subagent_ids = []
+            mark("cleared_pending_subagents")
+        if task_state.waiting_reason and task_state.phase != "blocked":
+            task_state.waiting_reason = ""
+            mark("cleared_waiting_reason")
+    elif not task_state.waiting_reason and task_state.pending_subagent_ids:
+        task_state.waiting_reason = f"waiting for subagent {task_state.pending_subagent_ids[0]}"
+        mark("restored_waiting_reason")
+
+    if task_state.phase == "blocked" and not (blocked_steps or failed_steps):
+        if waiting_steps:
+            if has_valid_waiting_subagents:
+                task_state.phase = "waiting_subagent"
+                mark("phase_waiting_subagent")
+            else:
+                task_state.waiting_reason = "任务存在 waiting 步骤，但缺少有效的子代理 ID。"
+                mark("blocked_invalid_waiting_state")
+        else:
+            task_state.phase = "executing"
+            if task_state.waiting_reason:
+                task_state.waiting_reason = ""
+                mark("cleared_waiting_reason")
+            mark("reopened_unblocked_task")
+
+    if task_state.phase == "executing" and not (in_progress_steps or pending_steps or waiting_steps):
+        if blocked_steps or failed_steps:
+            task_state.phase = "blocked"
+            if not task_state.waiting_reason:
+                task_state.waiting_reason = "任务包含失败或阻塞步骤，等待进一步处理。"
+                mark("restored_blocked_reason")
+            mark("phase_blocked")
+
+    pre_sync = (task_state.current_step_index, task_state.current_step_id, task_state.next_step_id)
+    sync_task_pointers(task_state)
+    post_sync = (task_state.current_step_index, task_state.current_step_id, task_state.next_step_id)
+    if pre_sync != post_sync:
+        mark("task_pointers_synced")
+
+    return task_state, changed, reasons

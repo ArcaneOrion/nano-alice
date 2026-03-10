@@ -1,6 +1,13 @@
 from pathlib import Path
 
-from nano_alice.agent.task_state import TaskStateRenderer, TaskStateStore, TaskRouter, build_steps, sync_task_pointers
+from nano_alice.agent.task_state import (
+    TaskRouter,
+    TaskStateRenderer,
+    TaskStateStore,
+    build_steps,
+    normalize_task_state,
+    sync_task_pointers,
+)
 
 
 def test_task_state_store_round_trip_and_archive(tmp_path: Path) -> None:
@@ -71,3 +78,117 @@ def test_task_router_prefers_task_and_replan(tmp_path: Path) -> None:
     assert again.mode == "task"
     assert again.continue_existing is True
     assert again.needs_replan is True
+
+
+def test_normalize_task_state_completes_done_steps_and_clears_waiting_fields(tmp_path: Path) -> None:
+    store = TaskStateStore(tmp_path)
+    task = store.create_new_task("cli:direct", "实现任务状态")
+    task.phase = "waiting_subagent"
+    task.steps = build_steps(["分析需求", "实现状态"])
+    for step in task.steps:
+        step.status = "done"
+    task.pending_subagent_ids = ["sg-001"]
+    task.waiting_reason = "waiting for subagent sg-001"
+    task.continuation_scheduled = True
+    sync_task_pointers(task)
+
+    normalized, changed, reasons = normalize_task_state(task)
+
+    assert changed is True
+    assert "phase_completed" in reasons
+    assert normalized.phase == "completed"
+    assert normalized.status == "done"
+    assert normalized.pending_subagent_ids == []
+    assert normalized.waiting_reason == ""
+    assert normalized.continuation_scheduled is False
+    assert normalized.current_step_index == 2
+    assert normalized.current_step_id == normalized.steps[-1].id
+    assert normalized.next_step_id == ""
+
+
+def test_normalize_task_state_recovers_orphan_waiting_phase(tmp_path: Path) -> None:
+    store = TaskStateStore(tmp_path)
+    task = store.create_new_task("cli:direct", "实现任务状态")
+    task.phase = "waiting_subagent"
+    task.steps = build_steps(["分析需求", "实现状态"])
+    task.steps[0].status = "done"
+    task.steps[1].status = "pending"
+    task.pending_subagent_ids = []
+    task.waiting_reason = "waiting for subagent sg-001"
+    task.continuation_scheduled = True
+    sync_task_pointers(task)
+
+    normalized, changed, reasons = normalize_task_state(task)
+
+    assert changed is True
+    assert "recovered_from_orphan_waiting_phase" in reasons
+    assert normalized.phase == "executing"
+    assert normalized.waiting_reason == ""
+    assert normalized.pending_subagent_ids == []
+    assert normalized.continuation_scheduled is False
+    assert normalized.current_step_index == 2
+    assert normalized.current_step_id == normalized.steps[1].id
+
+
+def test_normalize_task_state_blocks_waiting_step_without_subagent_id(tmp_path: Path) -> None:
+    store = TaskStateStore(tmp_path)
+    task = store.create_new_task("cli:direct", "恢复损坏任务")
+    task.phase = "executing"
+    task.steps = build_steps(["等待子代理", "汇总结果"])
+    task.steps[0].status = "waiting"
+    task.steps[0].executor = "subagent"
+    task.steps[0].spawn_task_id = ""
+    task.steps[1].status = "pending"
+    task.pending_subagent_ids = []
+    sync_task_pointers(task)
+
+    normalized, changed, reasons = normalize_task_state(task)
+
+    assert changed is True
+    assert "blocked_invalid_waiting_state" in reasons
+    assert normalized.phase == "blocked"
+    assert normalized.pending_subagent_ids == []
+    assert normalized.waiting_reason == "任务存在 waiting 步骤，但缺少有效的子代理 ID。"
+
+
+def test_normalize_task_state_blocks_reopened_completed_task_with_failed_step(tmp_path: Path) -> None:
+    store = TaskStateStore(tmp_path)
+    task = store.create_new_task("cli:direct", "恢复损坏任务")
+    task.phase = "completed"
+    task.status = "done"
+    task.steps = build_steps(["失败步骤", "后续步骤"])
+    task.steps[0].status = "failed"
+    task.steps[1].status = "pending"
+    task.continuation_scheduled = True
+    sync_task_pointers(task)
+
+    normalized, changed, reasons = normalize_task_state(task)
+
+    assert changed is True
+    assert "reopened_incomplete_task" in reasons
+    assert "cleared_continuation" in reasons
+    assert normalized.phase == "blocked"
+    assert normalized.status == "active"
+    assert normalized.continuation_scheduled is False
+    assert normalized.waiting_reason == "任务包含失败或阻塞步骤，等待进一步处理。"
+
+
+def test_normalize_task_state_clears_continuation_when_reopening_completed_task(tmp_path: Path) -> None:
+    store = TaskStateStore(tmp_path)
+    task = store.create_new_task("cli:direct", "恢复未完成任务")
+    task.phase = "completed"
+    task.status = "done"
+    task.steps = build_steps(["分析需求", "实现状态"])
+    task.steps[0].status = "done"
+    task.steps[1].status = "pending"
+    task.continuation_scheduled = True
+    sync_task_pointers(task)
+
+    normalized, changed, reasons = normalize_task_state(task)
+
+    assert changed is True
+    assert "reopened_incomplete_task" in reasons
+    assert "cleared_continuation" in reasons
+    assert normalized.phase == "executing"
+    assert normalized.status == "active"
+    assert normalized.continuation_scheduled is False
