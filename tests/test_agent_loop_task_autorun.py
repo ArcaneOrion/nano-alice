@@ -154,17 +154,70 @@ def test_user_task_schedules_silent_continuation(tmp_path: Path) -> None:
         )
     )
 
-    assert response is not None
-    assert response.metadata["task_phase"] == "executing"
-    assert response.metadata["task_current_step_index"] == 2
-    assert response.metadata["continuation_scheduled"] is True
+    assert response is None
     assert bus.inbound_size == 1
+
+    task_state = loop.task_states.load_active("cli:direct")
+    assert task_state is not None
+    assert task_state.phase == "executing"
+    assert task_state.current_step_index == 2
+    assert task_state.continuation_scheduled is True
 
     scheduled = asyncio.run(bus.consume_inbound())
     assert scheduled.channel == "system"
     assert scheduled.sender_id == "self"
     assert scheduled.metadata["_task_continue"] is True
     assert scheduled.metadata["_silent"] is True
+
+
+def test_process_direct_keeps_first_task_reply_when_continuation_is_scheduled(tmp_path: Path) -> None:
+    workspace = _make_workspace(tmp_path)
+    bus = MessageBus()
+    provider = AutorunProvider()
+    loop = AgentLoop(
+        bus=bus,
+        provider=provider,
+        workspace=workspace,
+        session_manager=SessionManager(workspace),
+        memory_agent_config=MemoryAgentConfig(enabled=False),
+    )
+
+    response = asyncio.run(loop.process_direct("请帮我实现任务状态"))
+
+    assert response == "已完成当前步骤：分析需求。"
+    assert bus.inbound_size == 1
+
+    task_state = loop.task_states.load_active("cli:direct")
+    assert task_state is not None
+    assert task_state.phase == "executing"
+    assert task_state.current_step_index == 2
+    assert task_state.continuation_scheduled is True
+
+
+def test_process_direct_returns_message_tool_content(tmp_path: Path) -> None:
+    """process_direct() should return message tool content when autorun uses it."""
+    workspace = _make_workspace(tmp_path)
+    bus = MessageBus()
+    provider = MessageToolAutorunProvider()
+    loop = AgentLoop(
+        bus=bus,
+        provider=provider,
+        workspace=workspace,
+        session_manager=SessionManager(workspace),
+        memory_agent_config=MemoryAgentConfig(enabled=False),
+    )
+
+    # Direct call via process_direct should return the message tool content
+    response = asyncio.run(loop.process_direct("请帮我实现任务状态"))
+
+    assert response == "已通过 message 工具发送当前步骤结果。"
+    # Bus has outbound messages (for bus-driven channels) and schedules continuation
+    assert bus.inbound_size == 1
+
+    # Task continues in background
+    task_state = loop.task_states.load_active("cli:direct")
+    assert task_state is not None
+    assert task_state.phase == "executing"
 
 
 def test_spawn_marks_task_waiting_for_subagent(tmp_path: Path) -> None:
@@ -198,13 +251,47 @@ def test_spawn_marks_task_waiting_for_subagent(tmp_path: Path) -> None:
         )
     )
 
-    assert response is not None
+    assert response is None
     task_state = loop.task_states.load_active("cli:direct")
     assert task_state is not None
     assert task_state.phase == "waiting_subagent"
     assert task_state.pending_subagent_ids == ["sg-001"]
     assert task_state.steps[0].status == "waiting"
     assert task_state.steps[0].spawn_task_id == "sg-001"
+    assert bus.inbound_size == 0
+
+
+def test_process_direct_returns_waiting_message_for_subagent_step(tmp_path: Path) -> None:
+    workspace = _make_workspace(tmp_path)
+    bus = MessageBus()
+    provider = AutorunProvider(spawn_first=True)
+    loop = AgentLoop(
+        bus=bus,
+        provider=provider,
+        workspace=workspace,
+        session_manager=SessionManager(workspace),
+        memory_agent_config=MemoryAgentConfig(enabled=False),
+    )
+
+    async def fake_spawn(**kwargs):
+        return {
+            "message": "Subagent task accepted.\nlabel: 实现当前步骤\nid: sg-001\nstatus: started",
+            "label": "实现当前步骤",
+            "id": "sg-001",
+            "status": "started",
+        }
+
+    spawn_tool = loop.tools.get("spawn")
+    assert spawn_tool is not None
+    spawn_tool._manager.spawn = fake_spawn  # type: ignore[attr-defined]
+
+    response = asyncio.run(loop.process_direct("请帮我实现任务状态"))
+
+    assert response == "已委派后台任务，等待结果。"
+    task_state = loop.task_states.load_active("cli:direct")
+    assert task_state is not None
+    assert task_state.phase == "waiting_subagent"
+    assert task_state.pending_subagent_ids == ["sg-001"]
     assert bus.inbound_size == 0
 
 
@@ -379,8 +466,7 @@ def test_autorun_continuation_chain_runs_to_completion(tmp_path: Path) -> None:
         )
     )
 
-    assert first_response is not None
-    assert first_response.metadata["continuation_scheduled"] is True
+    assert first_response is None
     assert bus.inbound_size == 1
 
     second_turn = asyncio.run(bus.consume_inbound())

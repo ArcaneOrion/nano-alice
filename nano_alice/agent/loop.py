@@ -890,6 +890,7 @@ class AgentLoop:
         msg: InboundMessage,
         session_key: str | None = None,
         on_progress: Callable[[str], Awaitable[None]] | None = None,
+        direct_return_required: bool = False,
     ) -> OutboundMessage | None:
         """Process a single inbound message and return the response."""
         internal_task_event = msg.channel == "system" and (
@@ -1252,7 +1253,32 @@ class AgentLoop:
             if continuation_scheduled:
                 meta["continuation_scheduled"] = True
 
+        # Message tool was used to send the response to the user via bus.
+        # For bus-driven channels (Telegram, Discord, etc.), the message is already sent
+        # so we return None. For direct callers (CLI / cron), they don't consume the bus,
+        # so we need to return the content directly.
         if message_tool_sent:
+            if direct_return_required and final_content:
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=final_content,
+                    metadata=meta,
+                )
+            return None
+
+        # Bus-driven chat channels can stay quiet during autorun so users only see the
+        # final stitched reply. Direct callers (CLI / cron run) do not consume follow-up
+        # continuations, so they still need the current step or waiting-state response.
+        defer_task_reply = (
+            route.mode == "task"
+            and task_state is not None
+            and (
+                continuation_scheduled
+                or task_state.phase == "waiting_subagent"
+            )
+        )
+        if defer_task_reply and not direct_return_required:
             return None
 
         if silent_internal:
@@ -1462,6 +1488,11 @@ class AgentLoop:
         await self._connect_mcp()
         msg = InboundMessage(channel=channel, sender_id="user", chat_id=chat_id, content=content)
         response = await self._process_message(
-            msg, session_key=session_key, on_progress=on_progress
+            # Direct callers only inspect the return value, so keep the first visible
+            # task response even when autorun schedules follow-up work in the bus.
+            msg,
+            session_key=session_key,
+            on_progress=on_progress,
+            direct_return_required=True,
         )
         return response.content if response else ""
