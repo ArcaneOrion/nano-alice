@@ -6,7 +6,12 @@ from unittest.mock import patch
 import pytest
 from typer.testing import CliRunner
 
-from nano_alice.cli.commands import app, _make_provider
+from nano_alice.cli.commands import (
+    _make_provider,
+    _workspace_bootstrap_templates,
+    _workspace_memory_templates,
+    app,
+)
 from nano_alice.config.schema import Config
 from nano_alice.providers.base import LLMProvider, LLMResponse
 from nano_alice.providers.custom_provider import CustomProvider
@@ -56,6 +61,7 @@ def test_onboard_fresh_install(mock_paths):
     assert "nano-alice is ready" in result.stdout
     assert config_file.exists()
     assert (workspace_dir / "AGENTS.md").exists()
+    assert (workspace_dir / "HEARTBEAT.md").exists()
     assert (workspace_dir / "IDENTITY.md").exists()
     assert (workspace_dir / "TOOLS.md").exists()
     assert (workspace_dir / "memory" / "MEMORY.md").exists()
@@ -64,6 +70,7 @@ def test_onboard_fresh_install(mock_paths):
 
     identity_content = (workspace_dir / "IDENTITY.md").read_text(encoding="utf-8")
     tools_content = (workspace_dir / "TOOLS.md").read_text(encoding="utf-8")
+    heartbeat_content = (workspace_dir / "HEARTBEAT.md").read_text(encoding="utf-8")
     memory_content = (workspace_dir / "memory" / "MEMORY.md").read_text(encoding="utf-8")
 
     assert not identity_content.startswith("<?xml")
@@ -75,6 +82,8 @@ def test_onboard_fresh_install(mock_paths):
     assert "2030-01-01T15:00:00" in tools_content
     assert "replace with your actual target time" in tools_content
     assert "current semantics" in tools_content
+    assert "HEARTBEAT.md" in tools_content
+    assert "heartbeat ticks" in heartbeat_content
     assert "Put project status in `projects.md`" in memory_content
     assert "Or override sensitive fields with" in result.stdout
     assert "Get one at: https://openrouter.ai/keys" not in result.stdout
@@ -119,8 +128,10 @@ def test_onboard_existing_workspace_safe_create(mock_paths):
     assert result.exit_code == 0
     assert "Created workspace" not in result.stdout
     assert "Created AGENTS.md" in result.stdout
+    assert "Created HEARTBEAT.md" in result.stdout
     assert "Created TOOLS.md" in result.stdout
     assert (workspace_dir / "AGENTS.md").exists()
+    assert (workspace_dir / "HEARTBEAT.md").exists()
     assert (workspace_dir / "TOOLS.md").exists()
 
 
@@ -137,6 +148,17 @@ def test_onboard_does_not_overwrite_existing_templates(mock_paths):
     assert existing_identity.read_text(encoding="utf-8") == "custom identity"
     assert (workspace_dir / "TOOLS.md").exists()
     assert (workspace_dir / "memory" / "lessons.md").exists()
+
+
+def test_repo_workspace_examples_match_onboard_templates():
+    repo_root = Path(__file__).resolve().parent.parent
+    workspace_dir = repo_root / "workspace"
+
+    for filename, content in _workspace_bootstrap_templates().items():
+        assert (workspace_dir / filename).read_text(encoding="utf-8") == content
+
+    for filename, content in _workspace_memory_templates().items():
+        assert (workspace_dir / "memory" / filename).read_text(encoding="utf-8") == content
 
 
 def test_config_matches_github_copilot_codex_with_hyphen_prefix():
