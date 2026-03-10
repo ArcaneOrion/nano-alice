@@ -24,6 +24,11 @@ class FakeProvider(LLMProvider):
         return "fake/model"
 
 
+class SubagentFakeProvider(FakeProvider):
+    def get_default_model(self) -> str:
+        return "subagent/model"
+
+
 class DailyRecallProvider(LLMProvider):
     def __init__(self) -> None:
         super().__init__(api_key=None, api_base=None)
@@ -218,3 +223,46 @@ def test_second_turn_injects_today_recall_from_daily_cache(tmp_path: Path) -> No
     second_user_message = provider.seen_messages[-1][-1]["content"]
     assert "<today_recall>" in second_user_message
     assert "DeepSeek" in second_user_message
+
+
+def test_agent_loop_uses_dedicated_subagent_provider_when_configured(tmp_path: Path) -> None:
+    workspace = tmp_path
+    (workspace / "AGENTS.md").write_text("agent rules", encoding="utf-8")
+    (workspace / "IDENTITY.md").write_text("stable identity", encoding="utf-8")
+
+    bus = MessageBus()
+    provider = FakeProvider()
+    subagent_provider = SubagentFakeProvider()
+
+    loop = AgentLoop(
+        bus=bus,
+        provider=provider,
+        subagent_provider=subagent_provider,
+        workspace=workspace,
+        session_manager=SessionManager(workspace),
+        memory_agent_config=MemoryAgentConfig(enabled=False),
+    )
+
+    assert loop.subagents.provider is subagent_provider
+    assert loop.subagents.model == "subagent/model"
+
+
+def test_agent_loop_preserves_explicit_model_for_subagents_without_dedicated_provider(tmp_path: Path) -> None:
+    workspace = tmp_path
+    (workspace / "AGENTS.md").write_text("agent rules", encoding="utf-8")
+    (workspace / "IDENTITY.md").write_text("stable identity", encoding="utf-8")
+
+    bus = MessageBus()
+    provider = FakeProvider()
+
+    loop = AgentLoop(
+        bus=bus,
+        provider=provider,
+        model="override/model",
+        workspace=workspace,
+        session_manager=SessionManager(workspace),
+        memory_agent_config=MemoryAgentConfig(enabled=False),
+    )
+
+    assert loop.subagents.provider is provider
+    assert loop.subagents.model == "override/model"

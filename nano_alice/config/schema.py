@@ -212,11 +212,23 @@ class MemoryAgentConfig(Base):
     interval: int = 10  # 强制运行间隔（轮数），默认 10
 
 
+class SubagentConfig(Base):
+    """Task subagent configuration."""
+
+    provider: str = ""  # empty = auto-match from model
+    model: str = ""  # empty = use main agent provider/model
+    models: list[str] = Field(default_factory=list)  # optional fallback pool after `model` fails
+    api_key: str = ""  # empty = auto-match from providers
+    api_base: str = ""  # empty = auto-match from providers
+    fallback_timeout_seconds: int = 30
+
+
 class AgentsConfig(Base):
     """Agent configuration."""
 
     defaults: AgentDefaults = Field(default_factory=AgentDefaults)
     memory: MemoryAgentConfig = Field(default_factory=MemoryAgentConfig)
+    subagent: SubagentConfig = Field(default_factory=SubagentConfig)
 
 
 class ProviderConfig(Base):

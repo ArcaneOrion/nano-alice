@@ -5,9 +5,12 @@ from unittest.mock import patch
 
 import pytest
 from typer.testing import CliRunner
+import typer
 
 from nano_alice.cli.commands import (
     _make_provider,
+    _resolve_default_agent_model,
+    _make_subagent_provider,
     _workspace_bootstrap_templates,
     _workspace_memory_templates,
     app,
@@ -310,6 +313,13 @@ def test_make_provider_uses_first_fallback_as_primary_when_model_not_explicitly_
     assert [child.api_base for child in provider.fallback_providers] == ["https://route-2.example.com/v1"]
 
 
+def test_resolve_default_agent_model_uses_first_fallback_when_model_not_explicitly_set():
+    config = Config()
+    config.agents.defaults.models = ["openai1/gpt-5.4", "openai2/gpt-5.4"]
+
+    assert _resolve_default_agent_model(config) == "openai1/gpt-5.4"
+
+
 def test_make_provider_applies_configured_fallback_timeout_seconds():
     config = Config()
     config.agents.defaults.model = "openai1/gpt-5.4"
@@ -324,6 +334,115 @@ def test_make_provider_applies_configured_fallback_timeout_seconds():
 
     assert isinstance(provider, RotatingProvider)
     assert provider.fallback_timeout_seconds == 30.0
+
+
+def test_make_subagent_provider_returns_none_without_explicit_config():
+    config = Config()
+
+    provider = _make_subagent_provider(config)
+
+    assert provider is None
+
+
+def test_make_subagent_provider_uses_custom_provider_for_explicit_endpoint():
+    config = Config()
+    config.agents.subagent.model = "openai/gpt-5.4-mini"
+    config.agents.subagent.api_key = "sk-subagent"
+    config.agents.subagent.api_base = "https://subagent.example.com/v1"
+
+    provider = _make_subagent_provider(config)
+
+    assert isinstance(provider, CustomProvider)
+    assert provider.default_model == "gpt-5.4-mini"
+    assert provider.api_base == "https://subagent.example.com/v1"
+
+
+def test_make_subagent_provider_rejects_partial_explicit_endpoint_with_only_api_key():
+    config = Config()
+    config.agents.subagent.model = "openai/gpt-5.4-mini"
+    config.agents.subagent.api_key = "sk-subagent"
+
+    with pytest.raises(typer.Exit):
+        _make_subagent_provider(config)
+
+
+def test_make_subagent_provider_rejects_partial_explicit_endpoint_with_only_api_base():
+    config = Config()
+    config.agents.subagent.model = "openai/gpt-5.4-mini"
+    config.agents.subagent.api_base = "https://subagent.example.com/v1"
+
+    with pytest.raises(typer.Exit):
+        _make_subagent_provider(config)
+
+
+def test_make_subagent_provider_inherits_model_for_explicit_endpoint():
+    config = Config()
+    config.agents.subagent.api_key = "sk-subagent"
+    config.agents.subagent.api_base = "https://subagent.example.com/v1"
+
+    provider = _make_subagent_provider(config, inherited_model="openai/gpt-5.4-mini")
+
+    assert isinstance(provider, CustomProvider)
+    assert provider.default_model == "gpt-5.4-mini"
+    assert provider.api_base == "https://subagent.example.com/v1"
+
+
+def test_make_subagent_provider_builds_rotating_pool_for_explicit_endpoint_models():
+    config = Config()
+    config.agents.subagent.models = ["openai/gpt-5.4-mini", "openai/gpt-5.4-nano"]
+    config.agents.subagent.api_key = "sk-subagent"
+    config.agents.subagent.api_base = "https://subagent.example.com/v1"
+    config.agents.subagent.fallback_timeout_seconds = 12
+
+    provider = _make_subagent_provider(config)
+
+    assert isinstance(provider, RotatingProvider)
+    assert provider.primary_provider.get_default_model() == "gpt-5.4-mini"
+    assert [child.get_default_model() for child in provider.fallback_providers] == ["gpt-5.4-nano"]
+    assert provider.fallback_timeout_seconds == 12.0
+
+
+def test_make_subagent_provider_builds_rotating_pool_from_configured_models():
+    config = Config()
+    config.agents.subagent.models = ["openai1/gpt-5.4-mini", "openai2/gpt-5.4-mini"]
+    config.agents.subagent.fallback_timeout_seconds = 9
+    config.providers.openai_1.api_key = "sk-route-1"
+    config.providers.openai_1.api_base = "https://route-1.example.com/v1"
+    config.providers.openai_2.api_key = "sk-route-2"
+    config.providers.openai_2.api_base = "https://route-2.example.com/v1"
+
+    provider = _make_subagent_provider(config)
+
+    assert isinstance(provider, RotatingProvider)
+    assert provider.primary_provider.api_base == "https://route-1.example.com/v1"
+    assert [child.api_base for child in provider.fallback_providers] == ["https://route-2.example.com/v1"]
+    assert provider.fallback_timeout_seconds == 9.0
+
+
+def test_make_subagent_provider_inherits_model_for_explicit_provider():
+    config = Config()
+    config.agents.subagent.provider = "openai_2"
+    config.providers.openai_2.api_key = "sk-route-2"
+    config.providers.openai_2.api_base = "https://route-2.example.com/v1"
+
+    provider = _make_subagent_provider(config, inherited_model="openai/gpt-5.4-mini")
+
+    assert isinstance(provider, CustomProvider)
+    assert provider.default_model == "gpt-5.4-mini"
+    assert provider.api_base == "https://route-2.example.com/v1"
+
+
+def test_make_subagent_provider_can_inherit_primary_default_pool_model():
+    config = Config()
+    config.agents.defaults.models = ["openai1/gpt-5.4", "openai2/gpt-5.4"]
+    config.agents.subagent.api_key = "sk-subagent"
+    config.agents.subagent.api_base = "https://subagent.example.com/v1"
+
+    provider = _make_subagent_provider(config, inherited_model=_resolve_default_agent_model(config))
+
+    assert isinstance(provider, CustomProvider)
+    assert provider.default_model == "gpt-5.4"
+    assert provider.api_base == "https://subagent.example.com/v1"
 
 
 class _StubProvider(LLMProvider):

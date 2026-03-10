@@ -460,19 +460,15 @@ def _make_provider(
         normalized_prefix = config._normalize_provider_key(prefix) or prefix.lower().replace("-", "_")
         return f"{normalized_prefix}/{remainder}"
 
-    using_default_model = model is None
-    default_models = config.agents.defaults.models if using_default_model else []
-    if using_default_model and default_models:
-        configured_model = config.agents.defaults.model
-        model_fields_set = getattr(config.agents.defaults, "model_fields_set", set())
-        primary_model = configured_model
-        if "model" not in model_fields_set and default_models:
-            primary_model = default_models[0]
-
+    def _build_provider_pool(
+        primary_model: str,
+        candidate_models: list[str],
+        fallback_timeout_seconds: float,
+    ):
         normalized_primary = _normalize_model_identifier(primary_model)
         fallback_models: list[str] = []
         seen_fallbacks: set[str] = set()
-        for candidate in default_models:
+        for candidate in candidate_models:
             normalized_candidate = _normalize_model_identifier(candidate)
             if normalized_candidate == normalized_primary or normalized_candidate in seen_fallbacks:
                 continue
@@ -484,7 +480,18 @@ def _make_provider(
         return RotatingProvider(
             primary_provider,
             fallback_providers,
-            fallback_timeout_seconds=float(config.agents.defaults.fallback_timeout_seconds),
+            fallback_timeout_seconds=fallback_timeout_seconds,
+        )
+
+    using_default_model = model is None
+    default_models = config.agents.defaults.models if using_default_model else []
+    if using_default_model and default_models:
+        primary_model = _resolve_default_agent_model(config)
+
+        return _build_provider_pool(
+            primary_model,
+            default_models,
+            float(config.agents.defaults.fallback_timeout_seconds),
         )
 
     model = model or config.agents.defaults.model
@@ -510,6 +517,96 @@ def _make_memory_provider(config: Config):
 
     # Model set but no explicit credentials → auto-match from providers
     return _make_provider(config, memory_cfg.model, memory_cfg.provider or None)
+
+
+def _resolve_default_agent_model(config: Config) -> str:
+    """Resolve the primary model used by the main agent loop."""
+    default_models = config.agents.defaults.models
+    configured_model = config.agents.defaults.model
+    model_fields_set = getattr(config.agents.defaults, "model_fields_set", set())
+    if default_models and "model" not in model_fields_set:
+        return default_models[0]
+    return configured_model
+
+
+def _make_subagent_provider(config: Config, inherited_model: str | None = None):
+    """Create a separate provider for task subagents, or None to reuse main."""
+    from nano_alice.providers.custom_provider import CustomProvider
+    from nano_alice.providers.rotating_provider import RotatingProvider
+
+    def _normalize_custom_endpoint_model(model_name: str) -> str:
+        if "/" not in model_name:
+            return model_name
+        prefix, remainder = model_name.split("/", 1)
+        normalized_prefix = config._normalize_provider_key(prefix)
+        if normalized_prefix == "openai" or normalized_prefix in Config.OPENAI_ROUTE_NAMES:
+            return remainder
+        return model_name
+
+    subagent_cfg = config.agents.subagent
+    configured_models = [candidate for candidate in subagent_cfg.models if candidate]
+    configured_model = subagent_cfg.model.strip()
+    configured_provider = subagent_cfg.provider.strip()
+    has_explicit_endpoint = bool(subagent_cfg.api_key and subagent_cfg.api_base)
+    has_partial_explicit_endpoint = bool(subagent_cfg.api_key) ^ bool(subagent_cfg.api_base)
+    has_explicit_subagent_config = bool(
+        configured_provider or configured_model or configured_models or subagent_cfg.api_key or subagent_cfg.api_base
+    )
+
+    if not has_explicit_subagent_config:
+        return None
+
+    if has_partial_explicit_endpoint:
+        console.print("[red]Error: agents.subagent.api_key and agents.subagent.api_base must be set together.[/red]")
+        raise typer.Exit(1)
+
+    primary_model = configured_model or (configured_models[0] if configured_models else "") or (inherited_model or "")
+    if not primary_model:
+        return None
+
+    fallback_models = configured_models if configured_models else [primary_model]
+
+    if has_explicit_endpoint:
+        def _build_custom_provider(model_name: str) -> CustomProvider:
+            return CustomProvider(
+                api_key=subagent_cfg.api_key,
+                api_base=subagent_cfg.api_base,
+                default_model=_normalize_custom_endpoint_model(model_name),
+            )
+
+        normalized_primary = primary_model.lower()
+        fallback_providers: list[CustomProvider] = []
+        seen_fallbacks: set[str] = set()
+        for candidate in fallback_models:
+            normalized_candidate = candidate.lower()
+            if normalized_candidate == normalized_primary or normalized_candidate in seen_fallbacks:
+                continue
+            seen_fallbacks.add(normalized_candidate)
+            fallback_providers.append(_build_custom_provider(candidate))
+
+        primary_provider = _build_custom_provider(primary_model)
+        if fallback_providers:
+            return RotatingProvider(
+                primary_provider,
+                fallback_providers,
+                fallback_timeout_seconds=float(subagent_cfg.fallback_timeout_seconds),
+            )
+        return primary_provider
+
+    if configured_models:
+        primary_provider = _make_provider(config, primary_model, configured_provider or None)
+        fallback_providers = [
+            _make_provider(config, candidate, configured_provider or None)
+            for candidate in configured_models
+            if candidate != primary_model
+        ]
+        return RotatingProvider(
+            primary_provider,
+            fallback_providers,
+            fallback_timeout_seconds=float(subagent_cfg.fallback_timeout_seconds),
+        )
+
+    return _make_provider(config, primary_model, configured_provider or None)
 
 
 def _setup_logging(enable_console: bool = False, console_level: str = "INFO") -> None:
@@ -586,6 +683,8 @@ def gateway(
 
     # Memory subagent provider (separate credentials when configured)
     memory_provider = _make_memory_provider(config)
+    default_model = _resolve_default_agent_model(config)
+    subagent_provider = _make_subagent_provider(config, inherited_model=default_model)
 
     # Create cron service first (callback set after agent creation)
     cron_store_path = get_data_dir() / "cron" / "jobs.json"
@@ -596,7 +695,7 @@ def gateway(
         bus=bus,
         provider=provider,
         workspace=config.workspace_path,
-        model=config.agents.defaults.model,
+        model=default_model,
         temperature=config.agents.defaults.temperature,
         max_tokens=config.agents.defaults.max_tokens,
         max_iterations=config.agents.defaults.max_tool_iterations,
@@ -611,6 +710,7 @@ def gateway(
         embeddings_config=config.tools.embeddings,
         memory_agent_config=config.agents.memory,
         memory_provider=memory_provider,
+        subagent_provider=subagent_provider,
     )
 
     # Set cron callback (needs agent)
@@ -737,6 +837,8 @@ def agent(
 
     # Memory subagent provider
     memory_provider = _make_memory_provider(config)
+    default_model = _resolve_default_agent_model(config)
+    subagent_provider = _make_subagent_provider(config, inherited_model=default_model)
 
     _setup_logging(enable_console=logs, console_level="INFO")
 
@@ -744,7 +846,7 @@ def agent(
         bus=bus,
         provider=provider,
         workspace=config.workspace_path,
-        model=config.agents.defaults.model,
+        model=default_model,
         temperature=config.agents.defaults.temperature,
         max_tokens=config.agents.defaults.max_tokens,
         max_iterations=config.agents.defaults.max_tool_iterations,
@@ -758,6 +860,7 @@ def agent(
         embeddings_config=config.tools.embeddings,
         memory_agent_config=config.agents.memory,
         memory_provider=memory_provider,
+        subagent_provider=subagent_provider,
     )
 
     # Show spinner when logs are off (no output to miss); skip when logs are on
@@ -1224,12 +1327,14 @@ def cron_run(
     bus = MessageBus()
 
     memory_provider = _make_memory_provider(config)
+    default_model = _resolve_default_agent_model(config)
+    subagent_provider = _make_subagent_provider(config, inherited_model=default_model)
 
     agent_loop = AgentLoop(
         bus=bus,
         provider=provider,
         workspace=config.workspace_path,
-        model=config.agents.defaults.model,
+        model=default_model,
         temperature=config.agents.defaults.temperature,
         max_tokens=config.agents.defaults.max_tokens,
         max_iterations=config.agents.defaults.max_tool_iterations,
@@ -1242,6 +1347,7 @@ def cron_run(
         embeddings_config=config.tools.embeddings,
         memory_agent_config=config.agents.memory,
         memory_provider=memory_provider,
+        subagent_provider=subagent_provider,
     )
 
     store_path = get_data_dir() / "cron" / "jobs.json"
