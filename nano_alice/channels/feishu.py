@@ -270,18 +270,12 @@ class FeishuChannel(BaseChannel):
             .log_level(lark.LogLevel.INFO) \
             .build()
         
-        # Create event handler (register message receive and read events)
-        def on_read_event(*args, **kwargs):
-            """Handle message read events - intentionally empty, just suppress errors."""
-            pass
-
+        # Create event handler (only register message receive, ignore other events)
         event_handler = lark.EventDispatcherHandler.builder(
             self.config.encrypt_key or "",
             self.config.verification_token or "",
         ).register_p2_im_message_receive_v1(
             self._on_message_sync
-        ).register_im_message_message_read_v1(
-            on_read_event
         ).build()
         
         # websockets uses Python default SSL context which may not find system CA on NixOS.
