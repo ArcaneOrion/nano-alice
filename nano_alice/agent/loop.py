@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from loguru import logger
 
 from nano_alice.agent.context import ContextBuilder
+from nano_alice.agent.daily_cache import DailyCacheRecorder, DailyCacheStore, TodayRecallRetriever
 from nano_alice.agent.memory import MemoryStore
 from nano_alice.agent.reminder_intent import ReminderIntent, ReminderIntentStore
 from nano_alice.agent.subagent import SubagentManager
@@ -128,6 +129,9 @@ class AgentLoop:
         self.embeddings_config = embeddings_config
 
         self.context = ContextBuilder(workspace)
+        self.daily_cache_store = DailyCacheStore(workspace)
+        self.daily_cache_recorder = DailyCacheRecorder()
+        self.today_recall = TodayRecallRetriever(self.daily_cache_store)
         self.sessions = session_manager or SessionManager(workspace)
         self.task_states = TaskStateStore(workspace)
         self.reminder_intents = ReminderIntentStore(workspace)
@@ -932,6 +936,7 @@ class AgentLoop:
                 current_message=self._build_intent_due_message(intent),
                 channel=origin_channel,
                 chat_id=origin_chat_id,
+                today_recall=None,
                 task_rules_xml=self.task_renderer.render_task_rules_xml(),
             )
             messages = self.context.render_messages(envelope)
@@ -989,6 +994,7 @@ class AgentLoop:
                 current_message=msg.content,
                 channel=channel,
                 chat_id=chat_id,
+                today_recall=None,
                 task_rules_xml=self.task_renderer.render_task_rules_xml(),
             )
             messages = self.context.render_messages(envelope)
@@ -1106,6 +1112,7 @@ class AgentLoop:
 
         # RAG: semantic search for relevant memory
         recalled_context = None
+        today_recall = None
         results = None
         if self._memory_index:
             try:
@@ -1116,6 +1123,10 @@ class AgentLoop:
                     )
             except Exception as e:
                 logger.warning("RAG recall failed: {}", e)
+        try:
+            today_recall = self.today_recall.recall(msg.content, session_key=session.key)
+        except Exception as e:
+            logger.warning("Today recall failed: {}", e)
 
         envelope = self.context.build_prompt_envelope(
             history=session.get_history(max_messages=self.memory_window),
@@ -1124,6 +1135,7 @@ class AgentLoop:
             channel=msg.channel,
             chat_id=msg.chat_id,
             recalled_context=recalled_context,
+            today_recall=today_recall,
             task_rules_xml=task_rules_xml,
             task_state_xml=task_state_xml,
         )
@@ -1230,6 +1242,22 @@ class AgentLoop:
                     )
                 )
                 self._pending_tasks.append(task)
+
+        if self._should_record_daily_cache(
+            msg=msg,
+            session_key=session_key,
+            internal_task_event=internal_task_event,
+            tool_events=tool_events,
+        ):
+            task = asyncio.create_task(
+                self._record_daily_cache(
+                    session_key=session.key,
+                    trigger=msg.content,
+                    tool_events=tool_events,
+                    final_content=final_content,
+                )
+            )
+            self._pending_tasks.append(task)
 
         meta = dict(msg.metadata or {})
         meta["context_size"] = context_metrics
@@ -1405,6 +1433,42 @@ class AgentLoop:
         except Exception as e:
             logger.error("Memory agent failed: {}", e)
             # Cursor not advanced — next run will retry the same messages
+
+    def _should_record_daily_cache(
+        self,
+        *,
+        msg: InboundMessage,
+        session_key: str | None,
+        internal_task_event: bool,
+        tool_events: list[dict[str, Any]],
+    ) -> bool:
+        if internal_task_event or msg.channel == "system":
+            return False
+        if session_key == "heartbeat" or msg.content.startswith("Read HEARTBEAT.md"):
+            return False
+        if msg.sender_id == "cron":
+            return False
+        return any(str(event.get("name") or "") in {"web_search", "web_fetch", "exec", "write_file", "edit_file", "spawn"} for event in tool_events)
+
+    async def _record_daily_cache(
+        self,
+        *,
+        session_key: str,
+        trigger: str,
+        tool_events: list[dict[str, Any]],
+        final_content: str | None,
+    ) -> None:
+        try:
+            records = self.daily_cache_recorder.build_records(
+                session_key=session_key,
+                trigger=trigger,
+                tool_events=tool_events,
+                final_content=final_content,
+            )
+            if records:
+                self.daily_cache_store.append_records(records)
+        except Exception as e:
+            logger.warning("Daily cache recording failed: {}", e)
 
     async def run_memory_maintenance(self) -> dict[str, Any]:
         """Reconcile existing managed memory files globally."""

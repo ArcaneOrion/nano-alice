@@ -136,15 +136,23 @@ To recall past events, grep {workspace_path}/memory/HISTORY.md"""
         logger.debug("bootstrap files loaded: {}", loaded)
         return "\n\n".join(parts) if parts else ""
 
-    def build_current_context_text(self, recalled_context: str | None = None) -> str:
+    def build_current_context_text(
+        self,
+        recalled_context: str | None = None,
+        today_recall: str | None = None,
+    ) -> str:
         """Build the current-turn context block injected alongside user input."""
         recalled = recalled_context or "(无)"
+        today = today_recall or "(无)"
         skills_summary = self.skills.build_skills_summary() or "(无)"
         logger.debug("skills summary: {} chars", len(skills_summary))
         return f"""<context>
   <memory>
     <recalled>{recalled}</recalled>
   </memory>
+  <today_recall>
+    {today}
+  </today_recall>
   <skills>
 {skills_summary}
   </skills>
@@ -159,6 +167,7 @@ To recall past events, grep {workspace_path}/memory/HISTORY.md"""
         channel: str | None = None,
         chat_id: str | None = None,
         recalled_context: str | None = None,
+        today_recall: str | None = None,
         task_rules_xml: str | None = None,
         task_state_xml: str | None = None,
     ) -> BuiltContext:
@@ -176,7 +185,10 @@ To recall past events, grep {workspace_path}/memory/HISTORY.md"""
         return BuiltContext(
             system_prompt=system_prompt,
             history_messages=self._prepare_history(history),
-            current_context_text=self.build_current_context_text(recalled_context=recalled_context),
+            current_context_text=self.build_current_context_text(
+                recalled_context=recalled_context,
+                today_recall=today_recall,
+            ),
             current_user_input=current_message,
             current_user_media=media,
         )
@@ -208,6 +220,7 @@ To recall past events, grep {workspace_path}/memory/HISTORY.md"""
         channel: str | None = None,
         chat_id: str | None = None,
         recalled_context: str | None = None,
+        today_recall: str | None = None,
         task_rules_xml: str | None = None,
         task_state_xml: str | None = None,
     ) -> list[dict[str, Any]]:
@@ -220,6 +233,7 @@ To recall past events, grep {workspace_path}/memory/HISTORY.md"""
             channel=channel,
             chat_id=chat_id,
             recalled_context=recalled_context,
+            today_recall=today_recall,
             task_rules_xml=task_rules_xml,
             task_state_xml=task_state_xml,
         )
