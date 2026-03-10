@@ -200,9 +200,9 @@ def onboard():
 
 
 
-def _create_workspace_templates(workspace: Path):
-    """Create default workspace template files."""
-    templates = {
+def _workspace_bootstrap_templates() -> dict[str, str]:
+    """Return default top-level workspace bootstrap templates."""
+    return {
         "AGENTS.md": """<agents>
   <!-- 文件分工：定义 agent 的全局协作原则、行为规范，以及如何理解 memory / skills 的入口关系。 -->
   <description>你是一个有用的 AI 助手。回答简洁、准确、友好。</description>
@@ -212,7 +212,7 @@ def _create_workspace_templates(workspace: Path):
     <rule>请求不明确时主动询问</rule>
     <rule>善用工具完成任务</rule>
     <rule>重要信息记录到 memory/MEMORY.md；过往事件记录到 memory/HISTORY.md</rule>
-    <rule>把 cron 触发优先理解为内部调度事件，而不是普通用户来信</rule>
+    <rule>当用户需要周期性提醒、后台巡检或定时续跑任务时，主动维护 workspace 根目录下的 `HEARTBEAT.md`</rule>
   </behavior>
 
   <memory>
@@ -266,10 +266,8 @@ def _create_workspace_templates(workspace: Path):
   </responsibilities>
 
   <guardrails>
-    <rule>不要把猜测说成事实</rule>
+    <rule>数据要有引用来源，保证源头可追溯</rule>
     <rule>默认简洁表达，但复杂任务要保留必要细节</rule>
-    <rule>执行工具前先简要说明要做什么</rule>
-    <rule>未核验发送结果前，不要声称消息已送达</rule>
   </guardrails>
 </identity>
 """,
@@ -298,8 +296,8 @@ def _create_workspace_templates(workspace: Path):
       <example command="nano-alice cron remove &lt;job_id&gt;">Remove a job</example>
     </examples>
     <notes>
-      <note>旧示例里的 `nanobot cron ...` 命令已经过时，应统一使用 `nano-alice cron ...`。</note>
-      <note>不要把“创建 cron”误等同于“用户一定会收到消息”；真实发送仍取决于后续提醒生成和渠道投递回执。</note>
+      <note>For periodic background checks that the agent should re-read on each heartbeat tick, keep the standing instructions in `HEARTBEAT.md` at the workspace root.</note>
+      <note>`HEARTBEAT.md` is the heartbeat workflow entrypoint: store durable polling instructions, update them when the task changes, and remove or clear them when the task is finished.</note>
     </notes>
   </tool>
 
@@ -308,18 +306,24 @@ def _create_workspace_templates(workspace: Path):
   </tool>
 </tools>
 """,
+        "HEARTBEAT.md": """# Heartbeat Tasks
+
+- Use this file for durable background checks, recurring follow-ups, and tasks the agent should revisit on heartbeat ticks.
+- Keep only active instructions here. Remove or clear completed tasks so heartbeat can stay quiet.
+- Prefer concrete checks, cadence expectations, and push criteria.
+
+## Examples
+
+- Every workday morning, check today's calendar and draft a concise agenda if there are important events.
+- Watch a long-running job and notify the user only when it finishes or fails.
+- Re-check a waiting dependency every 30 minutes and push an update only when status changes.
+""",
     }
-    
-    for filename, content in templates.items():
-        file_path = workspace / filename
-        if not file_path.exists():
-            file_path.write_text(content, encoding="utf-8")
-            console.print(f"  [dim]Created {filename}[/dim]")
-    
-    # Create memory directory and MEMORY.md
-    memory_dir = workspace / "memory"
-    memory_dir.mkdir(exist_ok=True)
-    memory_templates = {
+
+
+def _workspace_memory_templates() -> dict[str, str]:
+    """Return default workspace memory templates."""
+    return {
         "MEMORY.md": """# Long-term Memory
 
 ## Purpose
@@ -363,7 +367,20 @@ def _create_workspace_templates(workspace: Path):
 - Put class schedules, recurring reminders, and durable timing rules here.
 """,
     }
-    for filename, content in memory_templates.items():
+
+
+def _create_workspace_templates(workspace: Path):
+    """Create default workspace template files."""
+    for filename, content in _workspace_bootstrap_templates().items():
+        file_path = workspace / filename
+        if not file_path.exists():
+            file_path.write_text(content, encoding="utf-8")
+            console.print(f"  [dim]Created {filename}[/dim]")
+    
+    # Create memory directory and MEMORY.md
+    memory_dir = workspace / "memory"
+    memory_dir.mkdir(exist_ok=True)
+    for filename, content in _workspace_memory_templates().items():
         file_path = memory_dir / filename
         if not file_path.exists():
             file_path.write_text(content, encoding="utf-8")

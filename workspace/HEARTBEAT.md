@@ -1,16 +1,11 @@
 # Heartbeat Tasks
 
-This file is checked every 30 minutes by your nano-alice agent.
-Add tasks below that you want the agent to work on periodically.
+- Use this file for durable background checks, recurring follow-ups, and tasks the agent should revisit on heartbeat ticks.
+- Keep only active instructions here. Remove or clear completed tasks so heartbeat can stay quiet.
+- Prefer concrete checks, cadence expectations, and push criteria.
 
-If this file has no tasks (only headers and comments), the agent will skip the heartbeat.
+## Examples
 
-## Active Tasks
-
-<!-- Add your periodic tasks below this line -->
-
-
-## Completed
-
-<!-- Move completed tasks here or delete them -->
-
+- Every workday morning, check today's calendar and draft a concise agenda if there are important events.
+- Watch a long-running job and notify the user only when it finishes or fails.
+- Re-check a waiting dependency every 30 minutes and push an update only when status changes.
