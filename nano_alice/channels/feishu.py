@@ -270,14 +270,8 @@ class FeishuChannel(BaseChannel):
             .app_secret(self.config.app_secret) \
             .log_level(lark.LogLevel.INFO) \
             .build()
-        
-        # Create event handler (only register message receive, ignore other events)
-        event_handler = lark.EventDispatcherHandler.builder(
-            self.config.encrypt_key or "",
-            self.config.verification_token or "",
-        ).register_p2_im_message_receive_v1(
-            self._on_message_sync
-        ).build()
+
+        event_handler = self._build_event_handler()
         
         # websockets uses Python default SSL context which may not find system CA on NixOS.
         # Point SSL_CERT_FILE to certifi's bundle so all SSL connections in this process use it.
@@ -314,6 +308,18 @@ class FeishuChannel(BaseChannel):
         # Keep running until stopped
         while self._running:
             await asyncio.sleep(1)
+
+    def _build_event_handler(self) -> Any:
+        """Build the Feishu event handler and explicitly ignore non-message events we subscribe to."""
+        return (
+            lark.EventDispatcherHandler.builder(
+                self.config.encrypt_key or "",
+                self.config.verification_token or "",
+            )
+            .register_p2_im_message_receive_v1(self._on_message_sync)
+            .register_p2_im_message_message_read_v1(self._on_message_read_sync)
+            .build()
+        )
     
     async def stop(self) -> None:
         """Stop the Feishu bot."""
@@ -746,6 +752,10 @@ class FeishuChannel(BaseChannel):
         """
         if self._loop and self._loop.is_running():
             asyncio.run_coroutine_threadsafe(self._on_message(data), self._loop)
+
+    def _on_message_read_sync(self, data: Any) -> None:
+        """Ignore message-read receipts so the SDK does not log missing processor errors."""
+        return None
     
     async def _on_message(self, data: "P2ImMessageReceiveV1") -> None:
         """Handle incoming message from Feishu."""

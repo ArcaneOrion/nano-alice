@@ -281,6 +281,42 @@ def test_feishu_deduplicates_messages_and_ignores_bot_sender(
     asyncio.run(scenario())
 
 
+def test_feishu_registers_and_ignores_message_read_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bus = MessageBus()
+    channel = FeishuChannel(FeishuConfig(), bus)
+    registered_handlers = {}
+
+    class FakeBuilder:
+        def register_p2_im_message_receive_v1(self, handler):
+            registered_handlers["receive"] = handler
+            return self
+
+        def register_p2_im_message_message_read_v1(self, handler):
+            registered_handlers["message_read"] = handler
+            return self
+
+        def build(self):
+            return "fake-event-handler"
+
+    monkeypatch.setattr(
+        channel_module.lark.EventDispatcherHandler,
+        "builder",
+        lambda encrypt_key, verification_token: FakeBuilder(),
+    )
+
+    event_handler = channel._build_event_handler()
+
+    assert event_handler == "fake-event-handler"
+    assert registered_handlers["receive"] == channel._on_message_sync
+    assert registered_handlers["message_read"] == channel._on_message_read_sync
+
+    registered_handlers["message_read"](SimpleNamespace(event=SimpleNamespace()))
+
+    assert bus.inbound_size == 0
+
+
 def test_feishu_end_to_end_conversation_flow_updates_delivery_receipt(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
