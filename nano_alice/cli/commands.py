@@ -531,67 +531,22 @@ def _resolve_default_agent_model(config: Config) -> str:
 
 def _make_subagent_provider(config: Config, inherited_model: str | None = None):
     """Create a separate provider for task subagents, or None to reuse main."""
-    from nano_alice.providers.custom_provider import CustomProvider
     from nano_alice.providers.rotating_provider import RotatingProvider
-
-    def _normalize_custom_endpoint_model(model_name: str) -> str:
-        if "/" not in model_name:
-            return model_name
-        prefix, remainder = model_name.split("/", 1)
-        normalized_prefix = config._normalize_provider_key(prefix)
-        if normalized_prefix == "openai" or normalized_prefix in Config.OPENAI_ROUTE_NAMES:
-            return remainder
-        return model_name
 
     subagent_cfg = config.agents.subagent
     configured_models = [candidate for candidate in subagent_cfg.models if candidate]
     configured_model = subagent_cfg.model.strip()
     configured_provider = subagent_cfg.provider.strip()
-    has_explicit_endpoint = bool(subagent_cfg.api_key and subagent_cfg.api_base)
-    has_partial_explicit_endpoint = bool(subagent_cfg.api_key) ^ bool(subagent_cfg.api_base)
-    has_explicit_subagent_config = bool(
-        configured_provider or configured_model or configured_models or subagent_cfg.api_key or subagent_cfg.api_base
-    )
+    has_explicit_subagent_config = bool(configured_provider or configured_model or configured_models)
 
     if not has_explicit_subagent_config:
         return None
-
-    if has_partial_explicit_endpoint:
-        console.print("[red]Error: agents.subagent.api_key and agents.subagent.api_base must be set together.[/red]")
-        raise typer.Exit(1)
 
     primary_model = configured_model or (configured_models[0] if configured_models else "") or (inherited_model or "")
     if not primary_model:
         return None
 
     fallback_models = configured_models if configured_models else [primary_model]
-
-    if has_explicit_endpoint:
-        def _build_custom_provider(model_name: str) -> CustomProvider:
-            return CustomProvider(
-                api_key=subagent_cfg.api_key,
-                api_base=subagent_cfg.api_base,
-                default_model=_normalize_custom_endpoint_model(model_name),
-            )
-
-        normalized_primary = primary_model.lower()
-        fallback_providers: list[CustomProvider] = []
-        seen_fallbacks: set[str] = set()
-        for candidate in fallback_models:
-            normalized_candidate = candidate.lower()
-            if normalized_candidate == normalized_primary or normalized_candidate in seen_fallbacks:
-                continue
-            seen_fallbacks.add(normalized_candidate)
-            fallback_providers.append(_build_custom_provider(candidate))
-
-        primary_provider = _build_custom_provider(primary_model)
-        if fallback_providers:
-            return RotatingProvider(
-                primary_provider,
-                fallback_providers,
-                fallback_timeout_seconds=float(subagent_cfg.fallback_timeout_seconds),
-            )
-        return primary_provider
 
     if configured_models:
         primary_provider = _make_provider(config, primary_model, configured_provider or None)

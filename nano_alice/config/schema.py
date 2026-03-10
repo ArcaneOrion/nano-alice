@@ -218,8 +218,6 @@ class SubagentConfig(Base):
     provider: str = ""  # empty = auto-match from model
     model: str = ""  # empty = use main agent provider/model
     models: list[str] = Field(default_factory=list)  # optional fallback pool after `model` fails
-    api_key: str = ""  # empty = auto-match from providers
-    api_base: str = ""  # empty = auto-match from providers
     fallback_timeout_seconds: int = 30
 
 
