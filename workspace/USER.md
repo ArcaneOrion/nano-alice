@@ -1,49 +1,10 @@
-# User Profile
+<user>
+  <!-- 文件分工：记录用户画像和稳定偏好；项目状态、临时上下文、经验教训不要堆在这里。 -->
+  <description>这里记录用户的长期事实与稳定偏好。</description>
 
-Information about the user to help personalize interactions.
-
-## Basic Information
-
-- **Name**: (your name)
-- **Timezone**: (your timezone, e.g., UTC+8)
-- **Language**: (preferred language)
-
-## Preferences
-
-### Communication Style
-
-- [ ] Casual
-- [ ] Professional
-- [ ] Technical
-
-### Response Length
-
-- [ ] Brief and concise
-- [ ] Detailed explanations
-- [ ] Adaptive based on question
-
-### Technical Level
-
-- [ ] Beginner
-- [ ] Intermediate
-- [ ] Expert
-
-## Work Context
-
-- **Primary Role**: (your role, e.g., developer, researcher)
-- **Main Projects**: (what you're working on)
-- **Tools You Use**: (IDEs, languages, frameworks)
-
-## Topics of Interest
-
-- 
-- 
-- 
-
-## Special Instructions
-
-(Any specific instructions for how the assistant should behave)
-
----
-
-*Edit this file to customize nano-alice's behavior for your needs.*
+  <preferences>
+    <pref key="沟通风格">待补充</pref>
+    <pref key="时区">待补充</pref>
+    <pref key="语言">待补充</pref>
+  </preferences>
+</user>

@@ -1,23 +1,19 @@
 # Long-term Memory
 
-This file stores important information that should persist across sessions.
+## Purpose
 
-## User Information
+- Store long-term facts, stable preferences, and system-level rules.
+- Keep this file concise because it is loaded every turn.
+- Put project status in `projects.md`, milestones in `HISTORY.md`, and short-lived context in `SCRATCH.md`.
 
-(Important facts about the user)
+## User Facts
+
+- (Add stable facts here)
 
 ## Preferences
 
-(User preferences learned over time)
+- (Add stable preferences here)
 
-## Project Context
+## System Rules
 
-(Information about ongoing projects)
-
-## Important Notes
-
-(Things to remember)
-
----
-
-*This file is automatically updated by nano-alice when important information should be remembered.*
+- (Add durable behavioral rules here)
