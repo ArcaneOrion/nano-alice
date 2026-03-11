@@ -101,6 +101,15 @@ class SubagentManager:
             "id": task_id,
             "status": "started",
         }
+
+    @staticmethod
+    def _is_error_result(result: str | None) -> bool:
+        if not result:
+            return False
+        normalized = result.strip().lower()
+        if not normalized:
+            return False
+        return normalized.startswith("error:") or "request timed out after" in normalized
     
     async def _run_subagent(
         self,
@@ -190,9 +199,13 @@ class SubagentManager:
             
             if final_result is None:
                 final_result = "Task completed but no final response was generated."
-            
-            logger.info("Subagent [{}] completed successfully", task_id)
-            await self._announce_result(task_id, label, task, final_result, origin, "ok")
+
+            result_status = "error" if self._is_error_result(final_result) else "ok"
+            if result_status == "ok":
+                logger.info("Subagent [{}] completed successfully", task_id)
+            else:
+                logger.warning("Subagent [{}] completed with error result", task_id)
+            await self._announce_result(task_id, label, task, final_result, origin, result_status)
             
         except Exception as e:
             error_msg = f"Error: {str(e)}"

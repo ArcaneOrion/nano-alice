@@ -756,6 +756,8 @@ class AgentLoop:
         self,
         initial_messages: list[dict],
         on_progress: Callable[[str], Awaitable[None]] | None = None,
+        *,
+        stop_on_spawn: bool = False,
     ) -> tuple[str | None, list[str], dict[str, int], list[str], list[dict[str, Any]]]:
         """Run the agent iteration loop. Returns final content, tool names, usage, evidence, tool events."""
         messages = initial_messages
@@ -782,6 +784,7 @@ class AgentLoop:
                     total_usage[k] += response.usage.get(k, 0)
 
             if response.has_tool_calls:
+                stop_after_spawn = False
                 if on_progress:
                     clean = self._strip_think(response.content)
                     if clean:
@@ -836,6 +839,12 @@ class AgentLoop:
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
                     )
+                    if stop_on_spawn and tool_call.name == "spawn":
+                        stop_after_spawn = True
+                        final_content = self._strip_think(response.content)
+                        break
+                if stop_after_spawn:
+                    break
             else:
                 final_content = self._strip_think(response.content)
                 if response.finish_reason == "error":
@@ -1206,6 +1215,7 @@ class AgentLoop:
         final_content, tools_used, token_usage, task_evidence, tool_events = await self._run_agent_loop(
             initial_messages,
             on_progress=effective_progress,
+            stop_on_spawn=bool(task_state is not None and route.mode == "task"),
         )
 
         if final_content is None:
@@ -1330,6 +1340,15 @@ class AgentLoop:
         # so we return None. For direct callers (CLI / cron), they don't consume the bus,
         # so we need to return the content directly.
         if message_tool_sent:
+            if task_state is not None and task_state.phase == "waiting_subagent":
+                if direct_return_required:
+                    return OutboundMessage(
+                        channel=msg.channel,
+                        chat_id=msg.chat_id,
+                        content="已委派后台任务，等待结果。",
+                        metadata=meta,
+                    )
+                return None
             if direct_return_required and final_content:
                 return OutboundMessage(
                     channel=msg.channel,
@@ -1352,6 +1371,18 @@ class AgentLoop:
         )
         if defer_task_reply and not direct_return_required:
             return None
+
+        if (
+            direct_return_required
+            and task_state is not None
+            and task_state.phase == "waiting_subagent"
+        ):
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="已委派后台任务，等待结果。",
+                metadata=meta,
+            )
 
         if silent_internal:
             if task_state is None:
