@@ -25,9 +25,19 @@ class _Chunk:
 class _MemoryIndex:
     """Lazy-loaded, incrementally-updated embedding index stored as JSON."""
 
+    _DEFAULT_INCLUDED_FILES = frozenset({
+        "MEMORY.md",
+        "HISTORY.md",
+        "SCRATCH.md",
+        "schedule.md",
+        "projects.md",
+        "lessons.md",
+    })
+
     def __init__(self, memory_dir: Path, api_base: str, api_key: str,
                  model: str, dimensions: int, extra_headers: dict[str, str],
-                 min_score: float = 0.0):
+                 min_score: float = 0.0,
+                 included_files: set[str] | frozenset[str] | None = None):
         self._memory_dir = memory_dir
         self._api_base = api_base.rstrip("/")
         self._api_key = api_key
@@ -35,6 +45,7 @@ class _MemoryIndex:
         self._dimensions = dimensions
         self._extra_headers = extra_headers
         self._min_score = min_score
+        self._included_files = frozenset(included_files or self._DEFAULT_INCLUDED_FILES)
 
         self._index_path = memory_dir / ".index.json"
         self._chunks: list[_Chunk] = []
@@ -197,6 +208,8 @@ class _MemoryIndex:
         md_files: dict[str, float] = {}
         for f in self._memory_dir.glob("**/*.md"):
             rel = str(f.relative_to(self._memory_dir))
+            if rel not in self._included_files:
+                continue
             md_files[rel] = f.stat().st_mtime
 
         dirty_files: set[str] = set()
@@ -237,7 +250,6 @@ class _MemoryIndex:
             if not fp.exists():
                 continue
             text = fp.read_text(encoding="utf-8")
-            # For large append-only files, only index the tail
             if rel == "SCRATCH.md" and len(text) > self._SCRATCH_TAIL_CHARS:
                 text = text[-self._SCRATCH_TAIL_CHARS:]
             for start, end, block in self._chunk_markdown(text):
@@ -318,8 +330,10 @@ class MemorySearchTool(Tool):
     def description(self) -> str:
         return (
             "Search memory files by meaning (semantic search). "
-            "Returns the most relevant chunks from MEMORY.md, HISTORY.md, daily logs, "
-            "and other memory files. Use this when grep keyword search is insufficient."
+            "Returns the most relevant chunks from the default managed memory files, "
+            "including a recent tail view of SCRATCH.md, plus MEMORY.md, HISTORY.md, "
+            "projects.md, lessons.md, and schedule.md. "
+            "Use this when grep keyword search is insufficient."
         )
 
     @property

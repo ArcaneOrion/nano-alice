@@ -21,8 +21,8 @@ Memory directory: {memory_dir}
 
 ## Efficiency rules — IMPORTANT
 - **Batch tool calls**: call multiple tools in one round when possible (e.g. read 2 files at once).
-- **SCRATCH.md is append-only**: do NOT read it before appending. Use memory_search to check \
-for duplicates instead.
+- **SCRATCH.md is append-only**: do NOT read it before appending. Recent SCRATCH duplicate checks \
+are handled automatically.
 - **Stay in scope**: manage only the standard memory files. Do NOT create daily logs or ad-hoc files.
 - **Skip trivial conversations**: greetings, small talk, "1+1=?" → do NOT write anything, \
 just reply with a summary and STOP.
@@ -53,8 +53,9 @@ Skip writing for:
 - temporary chatter that does not change preferences, projects, or lessons
 
 ### 2. Check for duplicates
-Use memory_search (1-2 short queries, 5-10 words each) to see if the key facts already exist. \
-If they do, skip writing. Do NOT search more than twice.
+Use memory_search (1-2 short queries, 5-10 words each) to see if the key facts already exist \
+in long-term memory or managed memory files. If they do, skip writing. Do NOT search more than twice.
+For `memory/SCRATCH.md`, recent-entry duplicate checks are handled automatically when appending.
 
 ### 3. Write to the right file
 **MEMORY.md（主文件，≤5KB，每轮全量注入 system prompt）**
@@ -249,6 +250,9 @@ class MemoryAgent:
     _APPEND_ONLY_FILES = {"memory/HISTORY.md", "memory/SCRATCH.md"}
     _UPDATE_PREFERRED_FILES = {"memory/MEMORY.md", "memory/projects.md", "memory/lessons.md"}
     _DAILY_LOG_RE = re.compile(r"^memory/\d{4}-\d{2}-\d{2}\.md$")
+    _SCRATCH_ENTRY_RE = re.compile(r"^### \[[^\]]+\].*$", re.MULTILINE)
+    _SCRATCH_DEDUP_RECENT = 8
+    _SCRATCH_TAIL_CHARS = 6000
     _MAINTENANCE_TARGET_FILES = [
         "memory/MEMORY.md",
         "memory/HISTORY.md",
@@ -621,11 +625,92 @@ Before writing new information, check if these facts already exist. Update exist
     def _append_file(self, path: str, content: str) -> str:
         if error := self._validate_write_operation("append_file", path):
             return error
+        normalized = self._normalize_memory_path(path)
+        if normalized == "memory/SCRATCH.md" and self._is_duplicate_scratch_entry(content):
+            return "Skipped duplicate SCRATCH.md entry"
         fp = self._resolve(path)
         fp.parent.mkdir(parents=True, exist_ok=True)
         with open(fp, "a", encoding="utf-8") as f:
             f.write(content)
         return f"Appended {len(content)} chars to {path}"
+
+    @classmethod
+    def _split_scratch_entries(cls, text: str) -> list[str]:
+        matches = list(cls._SCRATCH_ENTRY_RE.finditer(text))
+        if not matches:
+            chunk = text.strip()
+            return [chunk] if chunk else []
+
+        entries: list[str] = []
+        for index, match in enumerate(matches):
+            start = match.start()
+            end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+            chunk = text[start:end].strip()
+            if chunk:
+                entries.append(chunk)
+        return entries
+
+    @classmethod
+    def _normalize_scratch_entry(cls, text: str) -> str:
+        lines: list[str] = []
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            if line.startswith("### ["):
+                line = re.sub(r"^###\s*\[[^\]]+\]\s*", "", line)
+            elif line.startswith(("- ", "* ")):
+                line = line[2:].strip()
+            line = re.sub(r"\s+", " ", line).strip().lower()
+            if line:
+                lines.append(line)
+        return "\n".join(lines)
+
+    @classmethod
+    def _scratch_bullets(cls, text: str) -> tuple[str, tuple[str, ...]]:
+        title = ""
+        bullets: list[str] = []
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            if line.startswith("### ["):
+                title = re.sub(r"^###\s*\[[^\]]+\]\s*", "", line)
+                title = re.sub(r"\s+", " ", title).strip().lower()
+                continue
+            if line.startswith(("- ", "* ")):
+                bullet = re.sub(r"\s+", " ", line[2:]).strip().lower()
+                if bullet:
+                    bullets.append(bullet)
+        return title, tuple(bullets)
+
+    @classmethod
+    def _scratch_entries_look_similar(cls, candidate: str, existing: str) -> bool:
+        if candidate == existing:
+            return True
+
+        candidate_title, candidate_bullets = cls._scratch_bullets(candidate)
+        existing_title, existing_bullets = cls._scratch_bullets(existing)
+
+        return bool(candidate_title) and candidate_title == existing_title and candidate_bullets == existing_bullets
+
+    def _is_duplicate_scratch_entry(self, content: str) -> bool:
+        candidate = self._normalize_scratch_entry(content)
+        if not candidate:
+            return False
+
+        scratch_path = self._resolve("memory/SCRATCH.md")
+        if not scratch_path.exists():
+            return False
+
+        existing_text = scratch_path.read_text(encoding="utf-8")
+        tail = existing_text[-self._SCRATCH_TAIL_CHARS :]
+        recent_entries = self._split_scratch_entries(tail)[-self._SCRATCH_DEDUP_RECENT :]
+        for entry in recent_entries:
+            normalized = self._normalize_scratch_entry(entry)
+            if normalized and self._scratch_entries_look_similar(candidate, normalized):
+                return True
+        return False
 
     def _edit_file(self, path: str, old_string: str, new_string: str) -> str:
         if error := self._validate_write_operation("edit_file", path):

@@ -1,7 +1,9 @@
 """Test session management with cache-friendly message handling."""
 
-import pytest
 from pathlib import Path
+
+import pytest
+
 from nano_alice.session.manager import Session, SessionManager
 
 # Test constants
@@ -124,6 +126,28 @@ class TestSessionImmutableHistory:
         history1 = session.get_history(max_messages=10)
         history2 = session.get_history(max_messages=10)
         assert history1 == history2
+
+    def test_get_history_skips_consolidated_messages_by_default(self) -> None:
+        """Test default history excludes messages already consolidated away from prompt context."""
+        session = create_session_with_messages("test:consolidated_default", 60)
+        session.last_consolidated = 35
+
+        history = session.get_history(max_messages=50)
+
+        assert len(history) == 25
+        assert history[0]["content"].endswith("msg35")
+        assert history[-1]["content"].endswith("msg59")
+
+    def test_get_history_can_include_consolidated_messages_when_requested(self) -> None:
+        """Test explicit full-history access is still available for audits and maintenance."""
+        session = create_session_with_messages("test:consolidated_full", 60)
+        session.last_consolidated = 35
+
+        history = session.get_history(max_messages=50, include_consolidated=True)
+
+        assert len(history) == 50
+        assert history[0]["content"].endswith("msg10")
+        assert history[-1]["content"].endswith("msg59")
 
     def test_messages_list_never_modified(self) -> None:
         """Test that messages list is never modified after creation."""

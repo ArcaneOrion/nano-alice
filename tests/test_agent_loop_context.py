@@ -2,8 +2,8 @@ import asyncio
 from datetime import date
 from pathlib import Path
 
-from nano_alice.agent.tools.base import Tool
 from nano_alice.agent.loop import AgentLoop
+from nano_alice.agent.tools.base import Tool
 from nano_alice.bus.events import InboundMessage
 from nano_alice.bus.queue import MessageBus
 from nano_alice.config.schema import MemoryAgentConfig
@@ -104,6 +104,17 @@ class FakeWebSearchTool(Tool):
             "   https://example.com/deepseek\n"
             "   未发现正式发布公告，当前主要是媒体转载。\n"
         )
+
+
+class SpyTodayRecall:
+    def __init__(self, result: str | None = None) -> None:
+        self.result = result
+        self.calls: list[tuple[str, str | None]] = []
+
+    def recall(self, query: str, now=None, *, session_key: str | None = None) -> str | None:
+        del now
+        self.calls.append((query, session_key))
+        return self.result
 
 
 def test_process_direct_reports_structured_context_metrics(tmp_path: Path) -> None:
@@ -223,6 +234,142 @@ def test_second_turn_injects_today_recall_from_daily_cache(tmp_path: Path) -> No
     second_user_message = provider.seen_messages[-1][-1]["content"]
     assert "<today_recall>" in second_user_message
     assert "DeepSeek" in second_user_message
+
+
+def test_normal_conversation_does_not_load_today_recall(tmp_path: Path) -> None:
+    workspace = tmp_path
+    (workspace / "AGENTS.md").write_text("agent rules", encoding="utf-8")
+    (workspace / "IDENTITY.md").write_text("stable identity", encoding="utf-8")
+    (workspace / "memory").mkdir()
+
+    bus = MessageBus()
+    provider = FakeProvider()
+    loop = AgentLoop(
+        bus=bus,
+        provider=provider,
+        workspace=workspace,
+        session_manager=SessionManager(workspace),
+        memory_agent_config=MemoryAgentConfig(enabled=False),
+    )
+    daily_dir = workspace / "memory" / "daily"
+    daily_dir.mkdir(exist_ok=True)
+    (daily_dir / f"{date.today().isoformat()}.md").write_text(
+        "# Daily Cache - today\n\n## Records\n\n",
+        encoding="utf-8",
+    )
+    spy = SpyTodayRecall("cached result")
+    loop.today_recall = spy
+
+    response = asyncio.run(
+        loop._process_message(
+            msg=InboundMessage(
+                channel="cli",
+                sender_id="user",
+                chat_id="direct",
+                content="今天有什么课吗",
+                media=[],
+                metadata={},
+            ),
+            session_key="cli:daily",
+            on_progress=None,
+        )
+    )
+
+    assert response is not None
+    assert spy.calls == []
+    current_user_message = provider.seen_messages[-1]["content"]
+    assert "<today_recall>" not in current_user_message
+
+
+def test_followup_query_loads_today_recall_only_when_needed(tmp_path: Path) -> None:
+    workspace = tmp_path
+    (workspace / "AGENTS.md").write_text("agent rules", encoding="utf-8")
+    (workspace / "IDENTITY.md").write_text("stable identity", encoding="utf-8")
+    (workspace / "memory").mkdir()
+
+    bus = MessageBus()
+    provider = FakeProvider()
+    loop = AgentLoop(
+        bus=bus,
+        provider=provider,
+        workspace=workspace,
+        session_manager=SessionManager(workspace),
+        memory_agent_config=MemoryAgentConfig(enabled=False),
+    )
+    daily_dir = workspace / "memory" / "daily"
+    daily_dir.mkdir(exist_ok=True)
+    (daily_dir / f"{date.today().isoformat()}.md").write_text(
+        "# Daily Cache - today\n\n## Records\n\n### [09:00:00] web_search\n- session_key: cli:daily\n- tags: [deepseek]\n- source_type: web_search\n- trigger: 再查一次\n- input: query=\"DeepSeek release news\"\n- brief_summary: 官网暂无正式公告\n- reuse_note: 可直接复用\n- freshness: session\n",
+        encoding="utf-8",
+    )
+    spy = SpyTodayRecall("今天已经查过一次，官网暂无正式公告。")
+    loop.today_recall = spy
+
+    response = asyncio.run(
+        loop._process_message(
+            msg=InboundMessage(
+                channel="cli",
+                sender_id="user",
+                chat_id="direct",
+                content="再确认一下，DeepSeek 今天有没有正式发布？",
+                media=[],
+                metadata={},
+            ),
+            session_key="cli:daily",
+            on_progress=None,
+        )
+    )
+
+    assert response is not None
+    assert spy.calls == [("再确认一下，DeepSeek 今天有没有正式发布？", "cli:daily")]
+    current_user_message = provider.seen_messages[-1]["content"]
+    assert "<today_recall>" in current_user_message
+    assert "官网暂无正式公告" in current_user_message
+
+
+def test_generic_official_site_question_does_not_trigger_unrelated_today_recall(tmp_path: Path) -> None:
+    workspace = tmp_path
+    (workspace / "AGENTS.md").write_text("agent rules", encoding="utf-8")
+    (workspace / "IDENTITY.md").write_text("stable identity", encoding="utf-8")
+    (workspace / "memory").mkdir()
+
+    bus = MessageBus()
+    provider = FakeProvider()
+    loop = AgentLoop(
+        bus=bus,
+        provider=provider,
+        workspace=workspace,
+        session_manager=SessionManager(workspace),
+        memory_agent_config=MemoryAgentConfig(enabled=False),
+    )
+    daily_dir = workspace / "memory" / "daily"
+    daily_dir.mkdir(exist_ok=True)
+    (daily_dir / f"{date.today().isoformat()}.md").write_text(
+        "# Daily Cache - today\n\n## Records\n\n### [09:00:00] web_search\n- session_key: cli:daily\n- tags: [deepseek]\n- source_type: web_search\n- trigger: 再查一次\n- input: query=\"DeepSeek release news\"\n- brief_summary: 官网暂无正式公告\n- reuse_note: 可直接复用\n- freshness: session\n",
+        encoding="utf-8",
+    )
+    spy = SpyTodayRecall("今天已经查过一次，官网暂无正式公告。")
+    loop.today_recall = spy
+
+    response = asyncio.run(
+        loop._process_message(
+            msg=InboundMessage(
+                channel="cli",
+                sender_id="user",
+                chat_id="direct",
+                content="Claude 官网地址是什么？",
+                media=[],
+                metadata={},
+            ),
+            session_key="cli:daily",
+            on_progress=None,
+        )
+    )
+
+    assert response is not None
+    assert spy.calls == []
+    current_user_message = provider.seen_messages[-1]["content"]
+    assert "<today_recall>" not in current_user_message
 
 
 def test_agent_loop_uses_dedicated_subagent_provider_when_configured(tmp_path: Path) -> None:

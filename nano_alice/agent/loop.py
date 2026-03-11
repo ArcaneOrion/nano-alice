@@ -78,6 +78,26 @@ _MEMORY_HIGH_KEYWORDS = (
     "keep in mind",
 )
 
+_TODAY_RECALL_HINTS = (
+    "再次确认",
+    "再确认",
+    "再查一次",
+    "再查",
+    "刚才",
+    "刚刚",
+    "之前查过",
+    "之前搜过",
+    "之前说",
+    "结果呢",
+    "日志里",
+    "继续看",
+    "double check",
+    "recheck",
+    "again",
+    "earlier",
+    "just now",
+)
+
 
 class AgentLoop:
     """
@@ -340,6 +360,26 @@ class AgentLoop:
             return f'{tc.name}("{val[:40]}…")' if len(val) > 40 else f'{tc.name}("{val}")'
 
         return ", ".join(_fmt(tc) for tc in tool_calls)
+
+    def _should_load_today_recall(
+        self,
+        msg: InboundMessage,
+        route: TaskRouteDecision,
+        *,
+        session_key: str,
+    ) -> bool:
+        """Return True when same-day tool cache is likely useful for this turn."""
+        if not session_key:
+            return False
+        needs_lookup = msg.metadata.get("_task_continue") or route.continue_existing
+        text = msg.content.strip().lower()
+        if not needs_lookup and not text:
+            return False
+        if not needs_lookup:
+            needs_lookup = any(hint in text for hint in _TODAY_RECALL_HINTS)
+        if not needs_lookup:
+            return False
+        return bool(self.daily_cache_store.load_today_records(session_key=session_key))
 
     def _build_task_goal(self, msg: InboundMessage, active_task: TaskState | None) -> str:
         if active_task and active_task.goal:
@@ -758,6 +798,7 @@ class AgentLoop:
         on_progress: Callable[[str], Awaitable[None]] | None = None,
         *,
         stop_on_spawn: bool = False,
+        emit_progress_text: bool = False,
     ) -> tuple[str | None, list[str], dict[str, int], list[str], list[dict[str, Any]]]:
         """Run the agent iteration loop. Returns final content, tool names, usage, evidence, tool events."""
         messages = initial_messages
@@ -787,7 +828,7 @@ class AgentLoop:
                 stop_after_spawn = False
                 if on_progress:
                     clean = self._strip_think(response.content)
-                    if clean:
+                    if emit_progress_text and clean:
                         await on_progress(clean)
                     await on_progress(self._tool_hint(response.tool_calls))
 
@@ -1172,10 +1213,11 @@ class AgentLoop:
                     )
             except Exception as e:
                 logger.warning("RAG recall failed: {}", e)
-        try:
-            today_recall = self.today_recall.recall(msg.content, session_key=session.key)
-        except Exception as e:
-            logger.warning("Today recall failed: {}", e)
+        if self._should_load_today_recall(msg, route, session_key=session.key):
+            try:
+                today_recall = self.today_recall.recall(msg.content, session_key=session.key)
+            except Exception as e:
+                logger.warning("Today recall failed: {}", e)
 
         envelope = self.context.build_prompt_envelope(
             history=session.get_history(max_messages=self.memory_window),
@@ -1216,6 +1258,7 @@ class AgentLoop:
             initial_messages,
             on_progress=effective_progress,
             stop_on_spawn=bool(task_state is not None and route.mode == "task"),
+            emit_progress_text=bool(on_progress and msg.channel == "cli"),
         )
 
         if final_content is None:

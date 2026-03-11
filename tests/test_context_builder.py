@@ -27,9 +27,11 @@ def test_build_prompt_envelope_separates_context_and_user_input(tmp_path: Path) 
 
     assert "recalled fact" in envelope.current_context_text
     assert "stable identity" not in envelope.current_context_text
+    assert "<current_time>" in envelope.current_context_text
     assert envelope.current_user_input == "latest question"
     assert envelope.history_messages == history
     assert "Current Session" in envelope.system_prompt
+    assert "## Current Time" not in envelope.system_prompt
 
 
 def test_render_messages_wraps_current_turn_context_and_input(tmp_path: Path) -> None:
@@ -52,6 +54,7 @@ def test_render_messages_wraps_current_turn_context_and_input(tmp_path: Path) ->
     assert messages[0]["role"] == "system"
     assert messages[-1]["role"] == "user"
     assert "<context>" in messages[-1]["content"]
+    assert "<current_time>" in messages[-1]["content"]
     assert "<user_input>" in messages[-1]["content"]
     assert "hello world" in messages[-1]["content"]
 
@@ -60,3 +63,21 @@ def test_render_messages_wraps_current_turn_context_and_input(tmp_path: Path) ->
     assert metrics["current_context_chars"] > 0
     assert metrics["user_input_chars"] == len("hello world")
     assert metrics["history_message_count"] == 0
+
+
+def test_system_prompt_is_stable_across_repeated_builds(tmp_path: Path) -> None:
+    workspace = tmp_path
+    (workspace / "AGENTS.md").write_text("agent rules", encoding="utf-8")
+    (workspace / "IDENTITY.md").write_text("stable identity", encoding="utf-8")
+    memory_dir = workspace / "memory"
+    memory_dir.mkdir()
+    (memory_dir / "MEMORY.md").write_text("remember this", encoding="utf-8")
+
+    builder = ContextBuilder(workspace)
+
+    first = builder.build_prompt_envelope(history=[], current_message="one")
+    second = builder.build_prompt_envelope(history=[], current_message="two")
+
+    assert first.system_prompt == second.system_prompt
+    assert "<current_time>" in first.current_context_text
+    assert "<current_time>" in second.current_context_text

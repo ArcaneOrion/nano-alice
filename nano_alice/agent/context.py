@@ -78,11 +78,6 @@ class ContextBuilder:
 
     def _get_identity(self) -> str:
         """Get the core identity section."""
-        from datetime import datetime
-        import time as _time
-
-        now = datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
-        tz = _time.strftime("%Z") or "UTC"
         workspace_path = str(self.workspace.expanduser().resolve())
         system = platform.system()
         runtime = (
@@ -93,9 +88,6 @@ class ContextBuilder:
         return f"""# nano-alice 🐈
 
 You are nano-alice, a helpful AI assistant.
-
-## Current Time
-{now} ({tz})
 
 ## Runtime
 {runtime}
@@ -142,21 +134,36 @@ To recall past events, grep {workspace_path}/memory/HISTORY.md"""
         today_recall: str | None = None,
     ) -> str:
         """Build the current-turn context block injected alongside user input."""
+        import time as _time
+        from datetime import datetime
+
         recalled = recalled_context or "(无)"
-        today = today_recall or "(无)"
+        now = datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
+        tz = _time.strftime("%Z") or "UTC"
         skills_summary = self.skills.build_skills_summary() or "(无)"
         logger.debug("skills summary: {} chars", len(skills_summary))
-        return f"""<context>
-  <memory>
-    <recalled>{recalled}</recalled>
-  </memory>
-  <today_recall>
-    {today}
-  </today_recall>
-  <skills>
-{skills_summary}
-  </skills>
-</context>"""
+        parts = [
+            "<context>",
+            "  <runtime>",
+            f"    <current_time>{now} ({tz})</current_time>",
+            "  </runtime>",
+            "  <memory>",
+            f"    <recalled>{recalled}</recalled>",
+            "  </memory>",
+        ]
+        if today_recall:
+            parts.extend([
+                "  <today_recall>",
+                f"    {today_recall}",
+                "  </today_recall>",
+            ])
+        parts.extend([
+            "  <skills>",
+            skills_summary,
+            "  </skills>",
+            "</context>",
+        ])
+        return "\n".join(parts)
 
     def build_prompt_envelope(
         self,
