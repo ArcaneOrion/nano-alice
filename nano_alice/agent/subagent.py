@@ -109,7 +109,7 @@ class SubagentManager:
         normalized = result.strip().lower()
         if not normalized:
             return False
-        return normalized.startswith("error:") or "request timed out after" in normalized
+        return normalized.startswith("error:") or normalized.startswith("request timed out after")
     
     async def _run_subagent(
         self,

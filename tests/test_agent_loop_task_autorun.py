@@ -174,6 +174,84 @@ class SpawnThenMessageProvider(LLMProvider):
         return "fake/model"
 
 
+class SameTurnSpawnThenMessageProvider(LLMProvider):
+    def __init__(self):
+        super().__init__(api_key=None, api_base=None)
+        self.calls = []
+        self.execution_calls = 0
+
+    async def chat(self, messages, tools=None, model=None, max_tokens=4096, temperature=0.7):
+        self.calls.append(messages)
+        system_text = messages[0]["content"]
+        if "planning_mode" in system_text:
+            return LLMResponse(
+                content='{"summary":"任务状态实现","strategy":"逐步推进","steps":["分析需求","实现状态","补测试"]}',
+                finish_reason="stop",
+                usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            )
+
+        self.execution_calls += 1
+        return LLMResponse(
+            content="我先委派后台任务，再尝试补一句同步。",
+            tool_calls=[
+                ToolCallRequest(
+                    id="tool-spawn-1",
+                    name="spawn",
+                    arguments={"task": "深入实现当前步骤", "label": "实现当前步骤"},
+                ),
+                ToolCallRequest(
+                    id="tool-message-1",
+                    name="message",
+                    arguments={"content": "这条消息不该在 spawn 后继续发出。"},
+                ),
+            ],
+            finish_reason="tool_calls",
+            usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        )
+
+    def get_default_model(self) -> str:
+        return "fake/model"
+
+
+class SameTurnMessageThenSpawnProvider(LLMProvider):
+    def __init__(self):
+        super().__init__(api_key=None, api_base=None)
+        self.calls = []
+        self.execution_calls = 0
+
+    async def chat(self, messages, tools=None, model=None, max_tokens=4096, temperature=0.7):
+        self.calls.append(messages)
+        system_text = messages[0]["content"]
+        if "planning_mode" in system_text:
+            return LLMResponse(
+                content='{"summary":"任务状态实现","strategy":"逐步推进","steps":["分析需求","实现状态","补测试"]}',
+                finish_reason="stop",
+                usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            )
+
+        self.execution_calls += 1
+        return LLMResponse(
+            content="我先同步一句当前进展，再委派后台任务。",
+            tool_calls=[
+                ToolCallRequest(
+                    id="tool-message-1",
+                    name="message",
+                    arguments={"content": "先同步一句当前进展。"},
+                ),
+                ToolCallRequest(
+                    id="tool-spawn-1",
+                    name="spawn",
+                    arguments={"task": "深入实现当前步骤", "label": "实现当前步骤"},
+                ),
+            ],
+            finish_reason="tool_calls",
+            usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        )
+
+    def get_default_model(self) -> str:
+        return "fake/model"
+
+
 class SubagentErrorProvider(LLMProvider):
     async def chat(self, messages, tools=None, model=None, max_tokens=4096, temperature=0.7):
         return LLMResponse(
@@ -181,6 +259,30 @@ class SubagentErrorProvider(LLMProvider):
             finish_reason="stop",
             usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
         )
+
+    def get_default_model(self) -> str:
+        return "fake/model"
+
+
+class StaticSubagentResultProvider(LLMProvider):
+    def __init__(self, content: str):
+        super().__init__(api_key=None, api_base=None)
+        self.content = content
+
+    async def chat(self, messages, tools=None, model=None, max_tokens=4096, temperature=0.7):
+        return LLMResponse(
+            content=self.content,
+            finish_reason="stop",
+            usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        )
+
+    def get_default_model(self) -> str:
+        return "fake/model"
+
+
+class RaisingSubagentProvider(LLMProvider):
+    async def chat(self, messages, tools=None, model=None, max_tokens=4096, temperature=0.7):
+        raise RuntimeError("provider crashed")
 
     def get_default_model(self) -> str:
         return "fake/model"
@@ -396,6 +498,146 @@ def test_task_mode_spawn_stops_before_follow_up_tool_turn(tmp_path: Path) -> Non
     assert bus.outbound_size == 0
 
     task_state = loop.task_states.load_active("cli:direct")
+    assert task_state is not None
+    assert task_state.phase == "waiting_subagent"
+    assert task_state.pending_subagent_ids == ["sg-001"]
+
+
+def test_task_mode_spawn_skips_later_tool_calls_in_same_response(tmp_path: Path) -> None:
+    workspace = _make_workspace(tmp_path)
+    bus = MessageBus()
+    provider = SameTurnSpawnThenMessageProvider()
+    loop = AgentLoop(
+        bus=bus,
+        provider=provider,
+        workspace=workspace,
+        session_manager=SessionManager(workspace),
+        memory_agent_config=MemoryAgentConfig(enabled=False),
+    )
+
+    async def fake_spawn(**kwargs):
+        return {
+            "message": "Subagent task accepted.\nlabel: 实现当前步骤\nid: sg-001\nstatus: started",
+            "label": "实现当前步骤",
+            "id": "sg-001",
+            "status": "started",
+        }
+
+    spawn_tool = loop.tools.get("spawn")
+    assert spawn_tool is not None
+    spawn_tool._manager.spawn = fake_spawn  # type: ignore[attr-defined]
+
+    async def no_progress(_: str) -> None:
+        return None
+
+    response = asyncio.run(
+        loop._process_message(
+            InboundMessage(channel="cli", sender_id="user", chat_id="direct", content="请帮我实现任务状态"),
+            session_key="cli:direct",
+            on_progress=no_progress,
+        )
+    )
+
+    assert response is None
+    assert provider.execution_calls == 1
+    assert bus.outbound_size == 0
+
+    task_state = loop.task_states.load_active("cli:direct")
+    assert task_state is not None
+    assert task_state.phase == "waiting_subagent"
+    assert task_state.pending_subagent_ids == ["sg-001"]
+
+
+def test_process_direct_prefers_waiting_message_when_message_and_spawn_share_turn(
+    tmp_path: Path,
+) -> None:
+    workspace = _make_workspace(tmp_path)
+    bus = MessageBus()
+    provider = SameTurnMessageThenSpawnProvider()
+    loop = AgentLoop(
+        bus=bus,
+        provider=provider,
+        workspace=workspace,
+        session_manager=SessionManager(workspace),
+        memory_agent_config=MemoryAgentConfig(enabled=False),
+    )
+
+    async def fake_spawn(**kwargs):
+        return {
+            "message": "Subagent task accepted.\nlabel: 实现当前步骤\nid: sg-001\nstatus: started",
+            "label": "实现当前步骤",
+            "id": "sg-001",
+            "status": "started",
+        }
+
+    spawn_tool = loop.tools.get("spawn")
+    assert spawn_tool is not None
+    spawn_tool._manager.spawn = fake_spawn  # type: ignore[attr-defined]
+
+    async def no_progress(_: str) -> None:
+        return None
+
+    response = asyncio.run(loop.process_direct("请帮我实现任务状态", on_progress=no_progress))
+
+    assert response == "已委派后台任务，等待结果。"
+    assert bus.outbound_size == 1
+    outbound = asyncio.run(bus.consume_outbound())
+    assert outbound.content == "先同步一句当前进展。"
+
+    task_state = loop.task_states.load_active("cli:direct")
+    assert task_state is not None
+    assert task_state.phase == "waiting_subagent"
+    assert task_state.pending_subagent_ids == ["sg-001"]
+
+
+def test_bus_channel_stays_quiet_after_message_and_spawn_same_turn(tmp_path: Path) -> None:
+    workspace = _make_workspace(tmp_path)
+    bus = MessageBus()
+    provider = SameTurnMessageThenSpawnProvider()
+    loop = AgentLoop(
+        bus=bus,
+        provider=provider,
+        workspace=workspace,
+        session_manager=SessionManager(workspace),
+        memory_agent_config=MemoryAgentConfig(enabled=False),
+    )
+
+    async def fake_spawn(**kwargs):
+        return {
+            "message": "Subagent task accepted.\nlabel: 实现当前步骤\nid: sg-001\nstatus: started",
+            "label": "实现当前步骤",
+            "id": "sg-001",
+            "status": "started",
+        }
+
+    spawn_tool = loop.tools.get("spawn")
+    assert spawn_tool is not None
+    spawn_tool._manager.spawn = fake_spawn  # type: ignore[attr-defined]
+
+    async def no_progress(_: str) -> None:
+        return None
+
+    response = asyncio.run(
+        loop._process_message(
+            InboundMessage(
+                channel="feishu",
+                sender_id="user",
+                chat_id="ou_user_1",
+                content="请帮我实现任务状态",
+            ),
+            session_key="feishu:ou_user_1",
+            on_progress=no_progress,
+        )
+    )
+
+    assert response is None
+    assert bus.outbound_size == 1
+    outbound = asyncio.run(bus.consume_outbound())
+    assert outbound.channel == "feishu"
+    assert outbound.chat_id == "ou_user_1"
+    assert outbound.content == "先同步一句当前进展。"
+
+    task_state = loop.task_states.load_active("feishu:ou_user_1")
     assert task_state is not None
     assert task_state.phase == "waiting_subagent"
     assert task_state.pending_subagent_ids == ["sg-001"]
@@ -813,6 +1055,73 @@ def test_subagent_timeout_result_is_reported_as_error(tmp_path: Path) -> None:
     assert announced.metadata["_subagent_result"] is True
     assert announced.metadata["_subagent_status"] == "error"
     assert "Error: request timed out after 30.0s" in announced.content
+
+
+@pytest.mark.parametrize(
+    ("content", "expected_status"),
+    [
+        (
+            "任务已完成。此前日志里出现过 request timed out after 30.0s，但重试后成功。",
+            "ok",
+        ),
+        (
+            '任务已完成。原始日志包含 "Error: request timed out after 30.0s"，这里只是引用。',
+            "ok",
+        ),
+    ],
+)
+def test_subagent_reference_to_error_text_is_not_reported_as_failure(
+    tmp_path: Path,
+    content: str,
+    expected_status: str,
+) -> None:
+    workspace = _make_workspace(tmp_path)
+    bus = MessageBus()
+    manager = SubagentManager(
+        provider=StaticSubagentResultProvider(content),
+        workspace=workspace,
+        bus=bus,
+    )
+
+    asyncio.run(
+        manager._run_subagent(
+            "sg-001",
+            "实现当前步骤",
+            "实现当前步骤",
+            {"channel": "cli", "chat_id": "direct"},
+        )
+    )
+
+    assert bus.inbound_size == 1
+    announced = asyncio.run(bus.consume_inbound())
+    assert announced.metadata["_subagent_result"] is True
+    assert announced.metadata["_subagent_status"] == expected_status
+    assert content in announced.content
+
+
+def test_subagent_provider_exception_is_reported_as_error(tmp_path: Path) -> None:
+    workspace = _make_workspace(tmp_path)
+    bus = MessageBus()
+    manager = SubagentManager(
+        provider=RaisingSubagentProvider(),
+        workspace=workspace,
+        bus=bus,
+    )
+
+    asyncio.run(
+        manager._run_subagent(
+            "sg-001",
+            "实现当前步骤",
+            "实现当前步骤",
+            {"channel": "cli", "chat_id": "direct"},
+        )
+    )
+
+    assert bus.inbound_size == 1
+    announced = asyncio.run(bus.consume_inbound())
+    assert announced.metadata["_subagent_result"] is True
+    assert announced.metadata["_subagent_status"] == "error"
+    assert "Error: provider crashed" in announced.content
 
 
 def test_extract_spawn_result_supports_structured_payload() -> None:
