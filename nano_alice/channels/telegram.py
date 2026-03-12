@@ -305,6 +305,8 @@ class TelegramChannel(BaseChannel):
         await update.message.reply_text(
             "🐈 nano-alice commands:\n"
             "/new — Start a new conversation\n"
+            "/task — Enter task mode for your next request\n"
+            "/chat — Return to normal chat mode\n"
             "/help — Show available commands"
         )
 

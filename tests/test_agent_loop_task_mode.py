@@ -71,6 +71,25 @@ def test_process_direct_creates_task_state_and_injects_xml(tmp_path: Path) -> No
         memory_agent_config=MemoryAgentConfig(enabled=False),
     )
 
+    arm_response = asyncio.run(
+        loop._process_message(
+            msg=InboundMessage(
+                channel="cli",
+                sender_id="user",
+                chat_id="direct",
+                content="/task",
+                media=[],
+                metadata={},
+            ),
+            session_key="cli:direct",
+            on_progress=None,
+            direct_return_required=True,
+        )
+    )
+
+    assert arm_response is not None
+    assert arm_response.content == "Task mode enabled. Send your task request next."
+
     response = asyncio.run(
         loop._process_message(
             msg=InboundMessage(
@@ -147,6 +166,50 @@ def test_mixed_question_stays_in_chat_mode_without_creating_task(tmp_path: Path)
     assert not active
 
 
+def test_task_mode_requires_explicit_task_command(tmp_path: Path) -> None:
+    workspace = tmp_path
+    (workspace / "AGENTS.md").write_text("agent rules", encoding="utf-8")
+    (workspace / "IDENTITY.md").write_text("stable identity", encoding="utf-8")
+    memory_dir = workspace / "memory"
+    memory_dir.mkdir()
+    (memory_dir / "MEMORY.md").write_text("long term note", encoding="utf-8")
+
+    bus = MessageBus()
+    provider = PlanningProvider()
+    sessions = SessionManager(workspace)
+
+    loop = AgentLoop(
+        bus=bus,
+        provider=provider,
+        workspace=workspace,
+        session_manager=sessions,
+        memory_agent_config=MemoryAgentConfig(enabled=False),
+    )
+
+    response = asyncio.run(
+        loop._process_message(
+            msg=InboundMessage(
+                channel="cli",
+                sender_id="user",
+                chat_id="direct",
+                content="请帮我设计并实现任务状态机制",
+                media=[],
+                metadata={},
+            ),
+            session_key="cli:direct",
+            on_progress=None,
+            direct_return_required=True,
+        )
+    )
+
+    assert response is not None
+    assert response.metadata["mode"] == "chat"
+    assert "task_phase" not in response.metadata
+    assert all("planning_mode" not in call[0]["content"] for call in provider.calls)
+    active = list((workspace / "task_state" / "active").glob("*.json"))
+    assert not active
+
+
 def test_plan_misalignment_detector_rejects_human_heartbeat_expansion(tmp_path: Path) -> None:
     workspace = tmp_path
     bus = MessageBus()
@@ -171,3 +234,47 @@ def test_plan_misalignment_detector_rejects_human_heartbeat_expansion(tmp_path: 
     )
 
     assert loop._plan_looks_misaligned(task.goal, task) is True
+
+
+def test_chat_command_cancels_active_task_and_resets_route_mode(tmp_path: Path) -> None:
+    workspace = tmp_path
+    (workspace / "AGENTS.md").write_text("agent rules", encoding="utf-8")
+    (workspace / "IDENTITY.md").write_text("stable identity", encoding="utf-8")
+    memory_dir = workspace / "memory"
+    memory_dir.mkdir()
+    (memory_dir / "MEMORY.md").write_text("long term note", encoding="utf-8")
+
+    bus = MessageBus()
+    provider = MixedQuestionProvider()
+    sessions = SessionManager(workspace)
+    loop = AgentLoop(
+        bus=bus,
+        provider=provider,
+        workspace=workspace,
+        session_manager=sessions,
+        memory_agent_config=MemoryAgentConfig(enabled=False),
+    )
+
+    task = loop.task_states.create_new_task("cli:direct", "实现任务状态")
+    task.phase = "executing"
+    task.steps = build_steps(["分析需求", "实现状态"])
+    loop.task_states.save_active(task)
+    session = sessions.get_or_create("cli:direct")
+    session.metadata["route_mode"] = "task"
+    session.metadata["task_entry_armed"] = False
+    sessions.save(session)
+
+    response = asyncio.run(
+        loop._process_message(
+            InboundMessage(channel="cli", sender_id="user", chat_id="direct", content="/chat"),
+            session_key="cli:direct",
+            direct_return_required=True,
+        )
+    )
+
+    assert response is not None
+    assert response.content == "Switched back to normal chat mode."
+    assert loop.task_states.load_active("cli:direct") is None
+    updated_session = sessions.get_or_create("cli:direct")
+    assert updated_session.metadata["route_mode"] == "chat"
+    assert updated_session.metadata["task_entry_armed"] is False

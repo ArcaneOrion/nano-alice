@@ -387,6 +387,57 @@ class AgentLoop:
         return msg.content.strip()
 
     @staticmethod
+    def _route_mode(session: Session) -> str:
+        return str(session.metadata.get("route_mode") or "chat")
+
+    @staticmethod
+    def _task_entry_armed(session: Session) -> bool:
+        return bool(session.metadata.get("task_entry_armed"))
+
+    def _set_session_route_mode(
+        self,
+        session: Session,
+        *,
+        mode: str,
+        task_entry_armed: bool = False,
+    ) -> None:
+        session.metadata["route_mode"] = mode
+        session.metadata["task_entry_armed"] = task_entry_armed
+        self.sessions.save(session)
+
+    def _reset_session_to_chat_mode(self, session: Session) -> None:
+        self._set_session_route_mode(session, mode="chat", task_entry_armed=False)
+
+    def _cancel_active_task(self, session: Session, task_state: TaskState | None) -> None:
+        if task_state is not None:
+            current = self._get_current_step(task_state)
+            if current is not None and current.status not in {"done", "failed"}:
+                current.status = "blocked"
+                current.notes = "User exited task mode via /chat."
+            task_state.status = "cancelled"
+            task_state.phase = "blocked"
+            task_state.waiting_reason = "用户通过 /chat 退出任务模式。"
+            task_state.pending_subagent_ids = []
+            task_state.continuation_scheduled = False
+            task_state.last_action = "user exited task mode"
+            task_state.last_event = "task_cancelled"
+            sync_task_pointers(task_state)
+            self.task_states.save_active(task_state)
+            self.task_states.archive_active(task_state.session_key)
+        self._reset_session_to_chat_mode(session)
+
+    def _decide_route(self, session: Session, msg: InboundMessage, active_task: TaskState | None) -> TaskRouteDecision:
+        if active_task is not None:
+            route = self.task_router.decide(msg.content, active_task=active_task)
+            route.mode = "task"
+            route.continue_existing = True
+            return route
+        if self._task_entry_armed(session):
+            self._set_session_route_mode(session, mode="task", task_entry_armed=False)
+            return TaskRouteDecision("task", "manual_task_entry")
+        return TaskRouteDecision("chat", "manual_default_chat")
+
+    @staticmethod
     def _get_current_step(task_state: TaskState | None):
         if task_state is None:
             return None
@@ -1117,11 +1168,23 @@ class AgentLoop:
         key = session_key or msg.session_key
         session = self.sessions.get_or_create(key)
 
+        active_task = self.task_states.load_active(session.key)
+        active_task = self._normalize_task_state(active_task, context="load_active")
+        if active_task is not None and active_task.phase == "completed":
+            self.task_states.archive_active(session.key)
+            self._reset_session_to_chat_mode(session)
+            if internal_task_event:
+                logger.info("Ignoring internal task event for completed task: {}", active_task.task_id)
+                return None
+            active_task = None
+
         # Slash commands
         cmd = msg.content.strip().lower()
         if cmd == "/new":
             messages_to_archive = session.messages.copy()
             session.clear()
+            session.metadata.pop("route_mode", None)
+            session.metadata.pop("task_entry_armed", None)
             self.sessions.save(session)
             self.sessions.invalidate(session.key)
             self.task_states.archive_active(session.key)
@@ -1144,9 +1207,32 @@ class AgentLoop:
                 content=(
                     "🐈 nano-alice commands:\n"
                     "/new — Start a new conversation\n"
+                    "/task — Enter task mode for your next request\n"
+                    "/chat — Return to normal chat mode\n"
                     "/memory — Reconcile existing memory files\n"
                     "/help — Show available commands"
                 ),
+            )
+        if cmd == "/task":
+            if active_task is not None:
+                self._set_session_route_mode(session, mode="task", task_entry_armed=False)
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content="Task mode is already active for this session. Send the next task update.",
+                )
+            self._set_session_route_mode(session, mode="task", task_entry_armed=True)
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="Task mode enabled. Send your task request next.",
+            )
+        if cmd == "/chat":
+            self._cancel_active_task(session, active_task)
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="Switched back to normal chat mode.",
             )
         if cmd == "/memory":
             result = await self.run_memory_maintenance()
@@ -1172,14 +1258,6 @@ class AgentLoop:
             if isinstance(message_tool, MessageTool):
                 message_tool.start_turn()
 
-        active_task = self.task_states.load_active(session.key)
-        active_task = self._normalize_task_state(active_task, context="load_active")
-        if active_task is not None and active_task.phase == "completed":
-            self.task_states.archive_active(session.key)
-            if internal_task_event:
-                logger.info("Ignoring internal task event for completed task: {}", active_task.task_id)
-                return None
-            active_task = None
         if internal_task_event and active_task is None:
             logger.info("Ignoring internal task event without active task: {}", msg.sender_id)
             return None
@@ -1206,11 +1284,12 @@ class AgentLoop:
             if active_task is None and forced_response is None:
                 return None
             active_task = self._normalize_task_state(active_task, context="post_subagent_result")
-        route = self.task_router.decide(msg.content, active_task=active_task)
+        route = self._decide_route(session, msg, active_task)
         is_new_task = route.mode == "task" and active_task is None
         task_state = self._maybe_start_task(session.key, msg, active_task, route)
         if task_state and task_state.phase in {"planning", "replanning"}:
             task_state = await self._plan_task(session, msg, task_state)
+            self._set_session_route_mode(session, mode="task", task_entry_armed=False)
         if is_new_task and task_state is not None and self._plan_looks_misaligned(msg.content, task_state):
             logger.warning(
                 "Discarding misaligned task plan: session_key={} task_id={} goal={}",
@@ -1219,6 +1298,7 @@ class AgentLoop:
                 msg.content,
             )
             self.task_states.clear_active(session.key)
+            self._reset_session_to_chat_mode(session)
             task_state = None
             route = TaskRouteDecision("chat", "fallback_from_misaligned_plan")
         if forced_response and task_state is not None and task_state.phase == "blocked":
@@ -1325,6 +1405,7 @@ class AgentLoop:
         previous_step_index = step_before.index if step_before is not None else None
         spawn_info = self._maybe_extract_spawn_result(tool_events)
         step_finished = False
+        completed_task = False
         if spawn_info is not None:
             task_state = self._mark_step_waiting_subagent(
                 task_state,
@@ -1333,9 +1414,12 @@ class AgentLoop:
             )
         else:
             task_state = self._complete_current_step(task_state, final_content, task_evidence)
+            completed_task = step_before is not None and task_state is None
             if previous_step_index is not None:
                 step_finished = task_state is None or task_state.current_step_index != previous_step_index
         task_state = self._normalize_task_state(task_state, context="post_step")
+        if completed_task:
+            self._reset_session_to_chat_mode(session)
 
         if not internal_task_event:
             session.add_message("user", msg.content, media=msg.media if msg.media else None)

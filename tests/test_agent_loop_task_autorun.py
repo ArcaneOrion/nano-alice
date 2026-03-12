@@ -298,6 +298,23 @@ def _make_workspace(tmp_path: Path) -> Path:
     return workspace
 
 
+def _enter_task_mode(
+    loop: AgentLoop,
+    *,
+    session_key: str = "cli:direct",
+    channel: str = "cli",
+    chat_id: str = "direct",
+) -> None:
+    response = asyncio.run(
+        loop._process_message(
+            InboundMessage(channel=channel, sender_id="user", chat_id=chat_id, content="/task"),
+            session_key=session_key,
+        )
+    )
+    assert response is not None
+    assert response.content == "Task mode enabled. Send your task request next."
+
+
 def test_user_task_schedules_silent_continuation(tmp_path: Path) -> None:
     workspace = _make_workspace(tmp_path)
     bus = MessageBus()
@@ -309,6 +326,7 @@ def test_user_task_schedules_silent_continuation(tmp_path: Path) -> None:
         session_manager=SessionManager(workspace),
         memory_agent_config=MemoryAgentConfig(enabled=False),
     )
+    _enter_task_mode(loop)
 
     response = asyncio.run(
         loop._process_message(
@@ -344,6 +362,7 @@ def test_process_direct_keeps_first_task_reply_when_continuation_is_scheduled(tm
         session_manager=SessionManager(workspace),
         memory_agent_config=MemoryAgentConfig(enabled=False),
     )
+    _enter_task_mode(loop)
 
     response = asyncio.run(loop.process_direct("请帮我实现任务状态"))
 
@@ -369,6 +388,7 @@ def test_process_direct_returns_message_tool_content(tmp_path: Path) -> None:
         session_manager=SessionManager(workspace),
         memory_agent_config=MemoryAgentConfig(enabled=False),
     )
+    _enter_task_mode(loop)
 
     # Direct call via process_direct should return the message tool content
     response = asyncio.run(loop.process_direct("请帮我实现任务状态"))
@@ -394,6 +414,7 @@ def test_spawn_marks_task_waiting_for_subagent(tmp_path: Path) -> None:
         session_manager=SessionManager(workspace),
         memory_agent_config=MemoryAgentConfig(enabled=False),
     )
+    _enter_task_mode(loop)
 
     async def fake_spawn(**kwargs):
         return {
@@ -435,6 +456,7 @@ def test_process_direct_returns_waiting_message_for_subagent_step(tmp_path: Path
         session_manager=SessionManager(workspace),
         memory_agent_config=MemoryAgentConfig(enabled=False),
     )
+    _enter_task_mode(loop)
 
     async def fake_spawn(**kwargs):
         return {
@@ -469,6 +491,7 @@ def test_task_mode_spawn_stops_before_follow_up_tool_turn(tmp_path: Path) -> Non
         session_manager=SessionManager(workspace),
         memory_agent_config=MemoryAgentConfig(enabled=False),
     )
+    _enter_task_mode(loop)
 
     async def fake_spawn(**kwargs):
         return {
@@ -514,6 +537,7 @@ def test_task_mode_spawn_skips_later_tool_calls_in_same_response(tmp_path: Path)
         session_manager=SessionManager(workspace),
         memory_agent_config=MemoryAgentConfig(enabled=False),
     )
+    _enter_task_mode(loop)
 
     async def fake_spawn(**kwargs):
         return {
@@ -561,6 +585,7 @@ def test_process_direct_prefers_waiting_message_when_message_and_spawn_share_tur
         session_manager=SessionManager(workspace),
         memory_agent_config=MemoryAgentConfig(enabled=False),
     )
+    _enter_task_mode(loop)
 
     async def fake_spawn(**kwargs):
         return {
@@ -601,6 +626,7 @@ def test_bus_channel_stays_quiet_after_message_and_spawn_same_turn(tmp_path: Pat
         session_manager=SessionManager(workspace),
         memory_agent_config=MemoryAgentConfig(enabled=False),
     )
+    _enter_task_mode(loop, session_key="feishu:ou_user_1", channel="feishu", chat_id="ou_user_1")
 
     async def fake_spawn(**kwargs):
         return {
@@ -760,6 +786,7 @@ def test_message_tool_turn_still_schedules_continuation(tmp_path: Path) -> None:
         session_manager=SessionManager(workspace),
         memory_agent_config=MemoryAgentConfig(enabled=False),
     )
+    _enter_task_mode(loop)
 
     async def no_progress(_: str) -> None:
         return None
@@ -807,6 +834,8 @@ def test_autorun_continuation_chain_runs_to_completion(tmp_path: Path) -> None:
         memory_agent_config=MemoryAgentConfig(enabled=False),
     )
 
+    _enter_task_mode(loop)
+
     first_response = asyncio.run(
         loop._process_message(
             InboundMessage(channel="cli", sender_id="user", chat_id="direct", content="请帮我实现任务状态"),
@@ -846,6 +875,8 @@ def test_autorun_continuation_chain_returns_final_outbound_for_feishu(tmp_path: 
         memory_agent_config=MemoryAgentConfig(enabled=False),
     )
 
+    _enter_task_mode(loop, session_key="feishu:ou_user_1", channel="feishu", chat_id="ou_user_1")
+
     first_response = asyncio.run(
         loop._process_message(
             InboundMessage(
@@ -871,6 +902,9 @@ def test_autorun_continuation_chain_returns_final_outbound_for_feishu(tmp_path: 
     assert final_response.chat_id == "ou_user_1"
     assert final_response.content == "已完成当前步骤：步骤3。"
     assert loop.task_states.load_active("feishu:ou_user_1") is None
+    session = loop.sessions.get_or_create("feishu:ou_user_1")
+    assert session.metadata["route_mode"] == "chat"
+    assert session.metadata["task_entry_armed"] is False
 
 
 def test_subagent_result_resumes_waiting_step_and_autoruns(tmp_path: Path) -> None:
@@ -959,6 +993,21 @@ def test_completed_dirty_active_task_is_archived_before_new_user_turn(tmp_path: 
     task.waiting_reason = "waiting for subagent sg-001"
     sync_task_pointers(task)
     loop.task_states.save_active(task)
+
+    arm_response = asyncio.run(
+        loop._process_message(
+            InboundMessage(
+                channel="feishu",
+                sender_id="user",
+                chat_id="direct",
+                content="/task",
+            ),
+            session_key="feishu:direct",
+        )
+    )
+
+    assert arm_response is not None
+    assert arm_response.content == "Task mode enabled. Send your task request next."
 
     response = asyncio.run(
         loop._process_message(

@@ -94,3 +94,5 @@ def test_memory_command_listed_in_help(tmp_path: Path) -> None:
 
     assert response is not None
     assert "/memory" in response.content
+    assert "/task" in response.content
+    assert "/chat" in response.content
