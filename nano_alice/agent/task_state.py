@@ -26,6 +26,7 @@ _TASK_HINTS = (
 )
 _CHAT_HINTS = ("是什么", "为什么", "怎么理解", "解释", "介绍", "what is", "why", "explain")
 _REPLAN_HINTS = ("重新计划", "重排", "改计划", "换成", "其实", "不要", "replan", "instead", "change")
+_CONTINUE_HINTS = ("继续", "继续执行", "接着", "下一步", "进度", "continue", "resume", "next step", "progress")
 
 
 def _escape_attr(value: str) -> str:
@@ -131,7 +132,8 @@ class TaskRouter:
         if active_task:
             if any(hint in text for hint in _REPLAN_HINTS):
                 return TaskRouteDecision("task", "user_requested_replan", True, True)
-            return TaskRouteDecision("task", "active_task_continues", True)
+            if any(hint in text for hint in _CONTINUE_HINTS):
+                return TaskRouteDecision("task", "active_task_continues", True)
 
         if any(hint in text for hint in _TASK_HINTS):
             return TaskRouteDecision("task", "task_like_request")

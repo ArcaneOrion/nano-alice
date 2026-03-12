@@ -1198,7 +1198,8 @@ class AgentLoop:
             )
 
         task_rules_xml = self.task_renderer.render_task_rules_xml()
-        task_state_xml = self.task_renderer.render_task_state_xml(task_state)
+        prompt_task_state = task_state if route.mode == "task" else None
+        task_state_xml = self.task_renderer.render_task_state_xml(prompt_task_state)
 
         # RAG: semantic search for relevant memory
         recalled_context = None
