@@ -48,8 +48,9 @@ class DeliveryReceipt:
     intent_id: str = ""
     delivered_at: str = field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
     content_preview: str = ""
+    task_id: str = ""
+    attachment_names: list[str] = field(default_factory=list)
 
     def to_metadata(self) -> dict[str, Any]:
         """Convert receipt to message metadata for internal system events."""
         return {"_delivery_receipt": True, "receipt": asdict(self)}
-

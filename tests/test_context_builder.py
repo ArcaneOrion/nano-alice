@@ -81,3 +81,32 @@ def test_system_prompt_is_stable_across_repeated_builds(tmp_path: Path) -> None:
     assert first.system_prompt == second.system_prompt
     assert "<current_time>" in first.current_context_text
     assert "<current_time>" in second.current_context_text
+
+
+def test_render_messages_can_encode_internal_event_without_user_input(tmp_path: Path) -> None:
+    workspace = tmp_path
+    (workspace / "AGENTS.md").write_text("agent rules", encoding="utf-8")
+    memory_dir = workspace / "memory"
+    memory_dir.mkdir()
+    (memory_dir / "MEMORY.md").write_text("remember this", encoding="utf-8")
+
+    builder = ContextBuilder(workspace)
+    envelope = builder.build_prompt_envelope(
+        history=[],
+        current_message="",
+        recalled_context="memory snippet",
+        delivery_summary="source=system\nstatus=sent",
+        internal_event_text="source=system\nevent_type=task_continue",
+    )
+
+    messages = builder.render_messages(envelope)
+    user_content = messages[-1]["content"]
+
+    assert "<internal_event>" in user_content
+    assert "event_type=task_continue" in user_content
+    assert "<delivery>" in user_content
+    assert "status=sent" in user_content
+    assert "<user_input>" not in user_content
+
+    metrics = builder.compute_context_metrics(envelope, messages)
+    assert metrics["user_input_chars"] == 0

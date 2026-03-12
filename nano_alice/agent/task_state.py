@@ -86,6 +86,10 @@ class TaskState:
     auto_run_count: int = 0
     failure_count: int = 0
     continuation_scheduled: bool = False
+    last_user_delivery_status: str = ""
+    last_user_delivery_at: str = ""
+    last_user_delivery_preview: str = ""
+    last_user_delivery_attachments: list[str] = field(default_factory=list)
     max_auto_runs: int = 8
     max_failures: int = 2
     max_replans: int = 2
@@ -122,6 +126,10 @@ class TaskState:
             auto_run_count=data.get("auto_run_count", 0),
             failure_count=data.get("failure_count", 0),
             continuation_scheduled=data.get("continuation_scheduled", False),
+            last_user_delivery_status=data.get("last_user_delivery_status", ""),
+            last_user_delivery_at=data.get("last_user_delivery_at", ""),
+            last_user_delivery_preview=data.get("last_user_delivery_preview", ""),
+            last_user_delivery_attachments=data.get("last_user_delivery_attachments", []),
             max_auto_runs=data.get("max_auto_runs", 8),
             max_failures=data.get("max_failures", 2),
             max_replans=data.get("max_replans", 2),
@@ -258,7 +266,9 @@ class TaskStateRenderer:
   <rule>未完成当前步骤前，不得跳到后续步骤。</rule>
   <rule>只有当步骤存在 evidence 或明确结果时，才能将其标记为 done。</rule>
   <rule>若发现计划不成立，可进入 replanning，但必须先更新计划再继续执行。</rule>
-  <rule>若收到 continuation 事件，应基于 task_state 继续当前步骤，不要把它当作新任务。</rule>
+  <rule>若收到 continuation 事件，这是系统控制消息，表示继续当前任务，不要把它当作新的用户消息。</rule>
+  <rule>若最近一次投递状态为 sent，表示上一条结果已经成功发送到目标频道。</rule>
+  <rule>若任务已完成且最近一次投递状态为 sent，continuation 默认用于状态核对、收尾或等待，不要重复发送相同结果。</rule>
   <rule>若任务需要高风险操作或缺少关键信息，必须进入 blocked 并等待用户确认。</rule>
 </task_execution_rules>"""
 
@@ -297,6 +307,10 @@ class TaskStateRenderer:
     <auto_run_count>{task_state.auto_run_count}</auto_run_count>
     <failure_count>{task_state.failure_count}</failure_count>
     <continuation_scheduled>{str(task_state.continuation_scheduled).lower()}</continuation_scheduled>
+    <last_user_delivery_status>{escape(task_state.last_user_delivery_status)}</last_user_delivery_status>
+    <last_user_delivery_at>{escape(task_state.last_user_delivery_at)}</last_user_delivery_at>
+    <last_user_delivery_preview>{escape(task_state.last_user_delivery_preview)}</last_user_delivery_preview>
+    <last_user_delivery_attachments>{escape(",".join(task_state.last_user_delivery_attachments))}</last_user_delivery_attachments>
     <max_auto_runs>{task_state.max_auto_runs}</max_auto_runs>
     <max_failures>{task_state.max_failures}</max_failures>
   </execution>

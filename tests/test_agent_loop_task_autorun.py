@@ -6,7 +6,7 @@ import pytest
 from nano_alice.agent.loop import AgentLoop
 from nano_alice.agent.subagent import SubagentManager
 from nano_alice.agent.task_state import build_steps, sync_task_pointers
-from nano_alice.bus.events import InboundMessage
+from nano_alice.bus.events import DeliveryReceipt, InboundMessage
 from nano_alice.bus.queue import MessageBus
 from nano_alice.config.schema import MemoryAgentConfig
 from nano_alice.providers.base import LLMProvider, LLMResponse, ToolCallRequest
@@ -773,6 +773,121 @@ def test_stale_continuation_does_not_resume_different_active_task(tmp_path: Path
     assert loaded.task_id == active_task.task_id
     assert loaded.continuation_scheduled is True
     assert loaded.last_event == "continuation_scheduled:user"
+
+
+def test_continuation_prompt_uses_internal_event_and_delivery_summary(tmp_path: Path) -> None:
+    workspace = _make_workspace(tmp_path)
+    bus = MessageBus()
+    provider = AutorunProvider()
+    loop = AgentLoop(
+        bus=bus,
+        provider=provider,
+        workspace=workspace,
+        session_manager=SessionManager(workspace),
+        memory_agent_config=MemoryAgentConfig(enabled=False),
+    )
+
+    task = loop.task_states.create_new_task("cli:direct", "实现任务状态")
+    task.task_id = "task-active"
+    task.phase = "executing"
+    task.steps = build_steps(["分析需求", "实现状态"])
+    task.steps[0].status = "in_progress"
+    sync_task_pointers(task)
+    loop.task_states.save_active(task)
+
+    session = loop.sessions.get_or_create("cli:direct")
+    session.metadata["last_delivery_receipt"] = {
+        "channel": "feishu",
+        "chat_id": "ou_user_1",
+        "status": "sent",
+        "provider_message_id": "om_123",
+        "error": "",
+        "intent_id": "",
+        "delivered_at": "2026-03-12T20:10:12",
+        "content_preview": "报告已经发送到飞书",
+        "task_id": task.task_id,
+        "attachment_names": ["report.html"],
+    }
+    loop.sessions.save(session)
+
+    asyncio.run(
+        loop._process_message(
+            InboundMessage(
+                channel="system",
+                sender_id="self",
+                chat_id="cli:direct",
+                content="Continue active task using current task_state. Execute only the current allowed step.",
+                metadata={
+                    "_task_continue": True,
+                    "_task_id": task.task_id,
+                    "_silent": True,
+                    "_session_key": "cli:direct",
+                },
+            )
+        )
+    )
+
+    rendered = provider.calls[-1][-1]["content"]
+    assert "<internal_event>" in rendered
+    assert "source=system" in rendered
+    assert "event_type=task_continue" in rendered
+    assert "<delivery>" in rendered
+    assert "status=sent" in rendered
+    assert "meaning=上一条结果已成功发送到目标频道" in rendered
+    assert "Continue active task using current task_state" not in rendered
+    assert "<user_input>" not in rendered
+
+
+def test_delivery_receipt_updates_active_task_delivery_fact(tmp_path: Path) -> None:
+    workspace = _make_workspace(tmp_path)
+    bus = MessageBus()
+    provider = AutorunProvider()
+    loop = AgentLoop(
+        bus=bus,
+        provider=provider,
+        workspace=workspace,
+        session_manager=SessionManager(workspace),
+        memory_agent_config=MemoryAgentConfig(enabled=False),
+    )
+
+    task = loop.task_states.create_new_task("cli:direct", "实现任务状态")
+    task.task_id = "task-active"
+    task.phase = "executing"
+    task.steps = build_steps(["分析需求", "实现状态"])
+    task.steps[0].status = "in_progress"
+    sync_task_pointers(task)
+    loop.task_states.save_active(task)
+
+    receipt = DeliveryReceipt(
+        channel="feishu",
+        chat_id="ou_user_1",
+        status="sent",
+        session_key="cli:direct",
+        task_id=task.task_id,
+        delivered_at="2026-03-12T20:10:12",
+        content_preview="报告已经发送到飞书",
+        attachment_names=["report.html"],
+    )
+
+    response = asyncio.run(
+        loop._process_message(
+            InboundMessage(
+                channel="system",
+                sender_id="delivery",
+                chat_id="cli:direct",
+                content="",
+                metadata=receipt.to_metadata(),
+            )
+        )
+    )
+
+    assert response is None
+    loaded = loop.task_states.load_active("cli:direct")
+    assert loaded is not None
+    assert loaded.last_user_delivery_status == "sent"
+    assert loaded.last_user_delivery_at == "2026-03-12T20:10:12"
+    assert loaded.last_user_delivery_preview == "报告已经发送到飞书"
+    assert loaded.last_user_delivery_attachments == ["report.html"]
 
 
 def test_message_tool_turn_still_schedules_continuation(tmp_path: Path) -> None:

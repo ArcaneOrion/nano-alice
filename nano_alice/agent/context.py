@@ -23,6 +23,7 @@ class BuiltContext:
     current_context_text: str
     current_user_input: str
     current_user_media: list[str] | None = None
+    internal_event_text: str | None = None
 
 
 class ContextBuilder:
@@ -109,6 +110,7 @@ When task_state is present, treat it as the source of truth for progress. Only e
 In task mode, the main agent should primarily handle planning, decision-making, summarization, and user-facing communication.
 In task mode, subagents should primarily handle research, code changes, and command execution when those steps can be delegated independently.
 When a task step is long, independent, or context-heavy, prefer the 'spawn' tool and then stop that round after recording the waiting state.
+When an <internal_event> block is present with source=system, treat it as a system control message.
 When a continuation event arrives, continue the active task instead of restarting the whole task.
 When remembering something important, write to {workspace_path}/memory/MEMORY.md
 To recall past events, grep {workspace_path}/memory/HISTORY.md"""
@@ -132,6 +134,7 @@ To recall past events, grep {workspace_path}/memory/HISTORY.md"""
         self,
         recalled_context: str | None = None,
         today_recall: str | None = None,
+        delivery_summary: str | None = None,
     ) -> str:
         """Build the current-turn context block injected alongside user input."""
         import time as _time
@@ -157,6 +160,12 @@ To recall past events, grep {workspace_path}/memory/HISTORY.md"""
                 f"    {today_recall}",
                 "  </today_recall>",
             ])
+        if delivery_summary:
+            parts.extend([
+                "  <delivery>",
+                f"    {delivery_summary}",
+                "  </delivery>",
+            ])
         parts.extend([
             "  <skills>",
             skills_summary,
@@ -177,6 +186,8 @@ To recall past events, grep {workspace_path}/memory/HISTORY.md"""
         today_recall: str | None = None,
         task_rules_xml: str | None = None,
         task_state_xml: str | None = None,
+        delivery_summary: str | None = None,
+        internal_event_text: str | None = None,
     ) -> BuiltContext:
         """Build structured prompt context before rendering messages."""
         del skill_names
@@ -195,9 +206,11 @@ To recall past events, grep {workspace_path}/memory/HISTORY.md"""
             current_context_text=self.build_current_context_text(
                 recalled_context=recalled_context,
                 today_recall=today_recall,
+                delivery_summary=delivery_summary,
             ),
             current_user_input=current_message,
             current_user_media=media,
+            internal_event_text=internal_event_text,
         )
 
     def render_messages(self, envelope: BuiltContext) -> list[dict[str, Any]]:
@@ -208,10 +221,12 @@ To recall past events, grep {workspace_path}/memory/HISTORY.md"""
         from datetime import datetime as _dt
 
         ts = _dt.now().strftime("%Y-%m-%d %H:%M")
-        current_text = (
-            f"{envelope.current_context_text}\n\n"
-            f"<user_input>\n[{ts}] {envelope.current_user_input}\n</user_input>"
-        )
+        parts = [envelope.current_context_text]
+        if envelope.internal_event_text:
+            parts.append(f"<internal_event>\n{envelope.internal_event_text}\n</internal_event>")
+        if envelope.current_user_input:
+            parts.append(f"<user_input>\n[{ts}] {envelope.current_user_input}\n</user_input>")
+        current_text = "\n\n".join(parts)
         messages.append({
             "role": "user",
             "content": self._build_user_content(current_text, envelope.current_user_media),
@@ -230,6 +245,8 @@ To recall past events, grep {workspace_path}/memory/HISTORY.md"""
         today_recall: str | None = None,
         task_rules_xml: str | None = None,
         task_state_xml: str | None = None,
+        delivery_summary: str | None = None,
+        internal_event_text: str | None = None,
     ) -> list[dict[str, Any]]:
         """Compatibility wrapper returning rendered provider messages."""
         envelope = self.build_prompt_envelope(
@@ -243,6 +260,8 @@ To recall past events, grep {workspace_path}/memory/HISTORY.md"""
             today_recall=today_recall,
             task_rules_xml=task_rules_xml,
             task_state_xml=task_state_xml,
+            delivery_summary=delivery_summary,
+            internal_event_text=internal_event_text,
         )
         messages = self.render_messages(envelope)
         logger.debug("build_messages: history={}, media={}", len(history), len(media) if media else 0)

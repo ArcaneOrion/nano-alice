@@ -274,11 +274,25 @@ class AgentLoop:
         finally:
             self._mcp_connecting = False
 
-    def _set_tool_context(self, channel: str, chat_id: str, message_id: str | None = None) -> None:
+    def _set_tool_context(
+        self,
+        channel: str,
+        chat_id: str,
+        message_id: str | None = None,
+        *,
+        session_key: str = "",
+        task_id: str = "",
+    ) -> None:
         """Update context for all tools that need routing info."""
         if message_tool := self.tools.get("message"):
             if isinstance(message_tool, MessageTool):
-                message_tool.set_context(channel, chat_id, message_id)
+                message_tool.set_context(
+                    channel,
+                    chat_id,
+                    message_id,
+                    session_key=session_key,
+                    task_id=task_id,
+                )
 
         if spawn_tool := self.tools.get("spawn"):
             if isinstance(spawn_tool, SpawnTool):
@@ -312,6 +326,73 @@ class AgentLoop:
             "If no, return an empty response."
         )
 
+    def _update_task_delivery_fact(
+        self,
+        session_key: str,
+        *,
+        status: str,
+        delivered_at: str = "",
+        content_preview: str = "",
+        attachment_names: list[str] | None = None,
+        task_id: str = "",
+    ) -> None:
+        task_state = self.task_states.load_active(session_key)
+        if task_state is None:
+            return
+        if task_id and task_state.task_id != task_id:
+            return
+        task_state.last_user_delivery_status = status[:50]
+        task_state.last_user_delivery_at = delivered_at[:50]
+        task_state.last_user_delivery_preview = content_preview[:200]
+        task_state.last_user_delivery_attachments = list(attachment_names or [])
+        self.task_states.save_active(task_state)
+
+    @staticmethod
+    def _format_delivery_summary(session: Session) -> str | None:
+        receipt = session.metadata.get("last_delivery_receipt")
+        if not isinstance(receipt, dict):
+            return None
+        attachments = receipt.get("attachment_names") or []
+        attachments_text = ", ".join(str(name) for name in attachments if name) or "(none)"
+        lines = [
+            f"source=system",
+            f"channel={receipt.get('channel') or '-'}",
+            f"chat_id={receipt.get('chat_id') or '-'}",
+            f"status={receipt.get('status') or '-'}",
+            f"delivered_at={receipt.get('delivered_at') or '-'}",
+            f"content_preview={receipt.get('content_preview') or '-'}",
+            f"attachments={attachments_text}",
+        ]
+        if receipt.get("status") == "sent":
+            lines.append("meaning=上一条结果已成功发送到目标频道")
+        if receipt.get("error"):
+            lines.append(f"error={receipt.get('error')}")
+        return "\n    ".join(lines)
+
+    @staticmethod
+    def _build_internal_event_text(msg: InboundMessage, task_state: TaskState | None) -> str | None:
+        if msg.metadata.get("_task_continue"):
+            reason = str(task_state.last_event or msg.sender_id or "system")
+            task_id = str(msg.metadata.get("_task_id") or (task_state.task_id if task_state else "") or "-")
+            return (
+                "source=system\n"
+                "event_type=task_continue\n"
+                f"task_id={task_id}\n"
+                f"reason={reason}\n"
+                "message=这是系统消息，表示任务引擎正在自动续跑当前任务步骤。"
+            )
+        if msg.metadata.get("_subagent_result"):
+            subagent_task_id = str(msg.metadata.get("_subagent_task_id") or "-")
+            status = str(msg.metadata.get("_subagent_status") or "ok")
+            return (
+                "source=system\n"
+                "event_type=subagent_result\n"
+                f"subagent_task_id={subagent_task_id}\n"
+                f"status={status}\n"
+                "message=这是系统消息，表示后台子代理结果已经返回。"
+            )
+        return None
+
     def _record_delivery_receipt(self, receipt: DeliveryReceipt) -> None:
         if receipt.intent_id:
             status = receipt.status if receipt.status in {"pending", "sent", "failed", "skipped"} else "failed"
@@ -339,8 +420,18 @@ class AgentLoop:
             "intent_id": receipt.intent_id,
             "delivered_at": receipt.delivered_at,
             "content_preview": receipt.content_preview,
+            "task_id": receipt.task_id,
+            "attachment_names": receipt.attachment_names,
         }
         self.sessions.save(session)
+        self._update_task_delivery_fact(
+            receipt.session_key,
+            status=receipt.status,
+            delivered_at=receipt.delivered_at,
+            content_preview=receipt.content_preview,
+            attachment_names=receipt.attachment_names,
+            task_id=receipt.task_id,
+        )
 
     @staticmethod
     def _strip_think(text: str | None) -> str | None:
@@ -1076,7 +1167,12 @@ class AgentLoop:
 
             key = session_key or msg.metadata.get("_session_key") or intent.session_key
             session = self.sessions.get_or_create(key)
-            self._set_tool_context(origin_channel, origin_chat_id, msg.metadata.get("message_id"))
+            self._set_tool_context(
+                origin_channel,
+                origin_chat_id,
+                msg.metadata.get("message_id"),
+                session_key=key,
+            )
             if message_tool := self.tools.get("message"):
                 if isinstance(message_tool, MessageTool):
                     message_tool.start_turn()
@@ -1253,7 +1349,13 @@ class AgentLoop:
 
             asyncio.create_task(_consolidate_and_unlock())
 
-        self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"))
+        self._set_tool_context(
+            msg.channel,
+            msg.chat_id,
+            msg.metadata.get("message_id"),
+            session_key=session.key,
+            task_id=active_task.task_id if active_task is not None else "",
+        )
         if message_tool := self.tools.get("message"):
             if isinstance(message_tool, MessageTool):
                 message_tool.start_turn()
@@ -1309,9 +1411,20 @@ class AgentLoop:
                 metadata={"mode": "task", "task_phase": task_state.phase},
             )
 
+        self._set_tool_context(
+            msg.channel,
+            msg.chat_id,
+            msg.metadata.get("message_id"),
+            session_key=session.key,
+            task_id=task_state.task_id if task_state is not None else "",
+        )
+
         task_rules_xml = self.task_renderer.render_task_rules_xml()
         prompt_task_state = task_state if route.mode == "task" else None
         task_state_xml = self.task_renderer.render_task_state_xml(prompt_task_state)
+        internal_event_text = self._build_internal_event_text(msg, task_state)
+        delivery_summary = self._format_delivery_summary(session)
+        current_message = "" if msg.metadata.get("_task_continue") else msg.content
 
         # RAG: semantic search for relevant memory
         recalled_context = None
@@ -1334,7 +1447,7 @@ class AgentLoop:
 
         envelope = self.context.build_prompt_envelope(
             history=session.get_history(max_messages=self.memory_window),
-            current_message=msg.content,
+            current_message=current_message,
             media=msg.media if msg.media else None,
             channel=msg.channel,
             chat_id=msg.chat_id,
@@ -1342,6 +1455,8 @@ class AgentLoop:
             today_recall=today_recall,
             task_rules_xml=task_rules_xml,
             task_state_xml=task_state_xml,
+            delivery_summary=delivery_summary,
+            internal_event_text=internal_event_text,
         )
         initial_messages = self.context.render_messages(envelope)
         context_metrics = self.context.compute_context_metrics(envelope, initial_messages)
@@ -1400,6 +1515,12 @@ class AgentLoop:
             if isinstance(message_tool, MessageTool) and message_tool._sent_in_turn:
                 message_tool_sent = True
                 final_content = message_tool._last_sent_content or final_content
+                if task_state is not None:
+                    task_state.last_user_delivery_status = "pending_receipt"
+                    task_state.last_user_delivery_at = ""
+                    task_state.last_user_delivery_preview = (message_tool._last_sent_content or "")[:200]
+                    task_state.last_user_delivery_attachments = list(message_tool._last_sent_media)
+                    self.task_states.save_active(task_state)
 
         step_before = self._get_current_step(task_state)
         previous_step_index = step_before.index if step_before is not None else None

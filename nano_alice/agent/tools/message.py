@@ -1,5 +1,6 @@
 """Message tool for sending messages to users."""
 
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from nano_alice.agent.tools.base import Tool
@@ -20,14 +21,27 @@ class MessageTool(Tool):
         self._default_channel = default_channel
         self._default_chat_id = default_chat_id
         self._default_message_id = default_message_id
+        self._default_session_key: str = ""
+        self._default_task_id: str = ""
         self._sent_in_turn: bool = False
         self._last_sent_content: str | None = None
+        self._last_sent_media: list[str] = []
 
-    def set_context(self, channel: str, chat_id: str, message_id: str | None = None) -> None:
+    def set_context(
+        self,
+        channel: str,
+        chat_id: str,
+        message_id: str | None = None,
+        *,
+        session_key: str = "",
+        task_id: str = "",
+    ) -> None:
         """Set the current message context."""
         self._default_channel = channel
         self._default_chat_id = chat_id
         self._default_message_id = message_id
+        self._default_session_key = session_key
+        self._default_task_id = task_id
 
     def set_send_callback(self, callback: Callable[[OutboundMessage], Awaitable[None]]) -> None:
         """Set the callback for sending messages."""
@@ -37,6 +51,7 @@ class MessageTool(Tool):
         """Reset per-turn send tracking."""
         self._sent_in_turn = False
         self._last_sent_content = None
+        self._last_sent_media = []
 
     @property
     def name(self) -> str:
@@ -98,6 +113,9 @@ class MessageTool(Tool):
             media=media or [],
             metadata={
                 "message_id": message_id,
+                "_session_key": self._default_session_key or f"{channel}:{chat_id}",
+                "_task_id": self._default_task_id,
+                "attachment_names": [Path(path).name for path in (media or [])],
             }
         )
 
@@ -105,6 +123,7 @@ class MessageTool(Tool):
             await self._send_callback(msg)
             self._sent_in_turn = True
             self._last_sent_content = content
+            self._last_sent_media = [Path(path).name for path in (media or [])]
             media_info = f" with {len(media)} attachments" if media else ""
             return f"Message sent to {channel}:{chat_id}{media_info}"
         except Exception as e:

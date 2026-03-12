@@ -76,6 +76,8 @@ class BaseChannel(ABC):
             intent_id=str(metadata.get("_intent_id") or ""),
             delivered_at=datetime.now().isoformat(timespec="seconds"),
             content_preview=(msg.content or "")[:200],
+            task_id=str(metadata.get("_task_id") or ""),
+            attachment_names=list(metadata.get("attachment_names") or []),
         )
 
     def _failed_receipt(self, msg: OutboundMessage, error: str) -> DeliveryReceipt:
@@ -90,6 +92,8 @@ class BaseChannel(ABC):
             intent_id=str(metadata.get("_intent_id") or ""),
             delivered_at=datetime.now().isoformat(timespec="seconds"),
             content_preview=(msg.content or "")[:200],
+            task_id=str(metadata.get("_task_id") or ""),
+            attachment_names=list(metadata.get("attachment_names") or []),
         )
     
     def is_allowed(self, sender_id: str) -> bool:

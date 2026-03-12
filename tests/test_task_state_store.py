@@ -39,6 +39,10 @@ def test_task_state_renderer_contains_plan_and_cursor(tmp_path: Path) -> None:
     task.steps[0].spawn_task_id = "sg-001"
     task.pending_subagent_ids = ["sg-001"]
     task.waiting_reason = "waiting for subagent sg-001"
+    task.last_user_delivery_status = "sent"
+    task.last_user_delivery_at = "2026-03-12T20:10:12"
+    task.last_user_delivery_preview = "报告已经发送到飞书"
+    task.last_user_delivery_attachments = ["report.html"]
     sync_task_pointers(task)
 
     xml = TaskStateRenderer.render_task_state_xml(task)
@@ -49,6 +53,9 @@ def test_task_state_renderer_contains_plan_and_cursor(tmp_path: Path) -> None:
     assert 'status="waiting"' in xml
     assert 'executor="subagent"' in xml
     assert "<waiting_reason>waiting for subagent sg-001</waiting_reason>" in xml
+    assert "<last_user_delivery_status>sent</last_user_delivery_status>" in xml
+    assert "<last_user_delivery_preview>报告已经发送到飞书</last_user_delivery_preview>" in xml
+    assert "<last_user_delivery_attachments>report.html</last_user_delivery_attachments>" in xml
 
 
 def test_task_state_renderer_escapes_executor_and_spawn_task_id(tmp_path: Path) -> None:
