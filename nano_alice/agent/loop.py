@@ -654,6 +654,20 @@ class AgentLoop:
         self.task_states.save_active(task_state)
         return task_state
 
+    @staticmethod
+    def _plan_looks_misaligned(goal: str, task_state: TaskState) -> bool:
+        goal_text = goal.lower()
+        if not any(marker in goal_text for marker in ("你的", "your", "吗", "?", "？", "怎么", "知道")):
+            return False
+
+        plan_text = " ".join(
+            [task_state.summary, task_state.strategy, *(step.title for step in task_state.steps)]
+        ).lower()
+        user_biology_terms = ("人类", "心脏", "生理", "医学", "human", "cardiac", "biology")
+        if any(term in goal_text for term in user_biology_terms):
+            return False
+        return any(term in plan_text for term in user_biology_terms)
+
     def _maybe_start_task(
         self,
         session_key: str,
@@ -1193,9 +1207,20 @@ class AgentLoop:
                 return None
             active_task = self._normalize_task_state(active_task, context="post_subagent_result")
         route = self.task_router.decide(msg.content, active_task=active_task)
+        is_new_task = route.mode == "task" and active_task is None
         task_state = self._maybe_start_task(session.key, msg, active_task, route)
         if task_state and task_state.phase in {"planning", "replanning"}:
             task_state = await self._plan_task(session, msg, task_state)
+        if is_new_task and task_state is not None and self._plan_looks_misaligned(msg.content, task_state):
+            logger.warning(
+                "Discarding misaligned task plan: session_key={} task_id={} goal={}",
+                session.key,
+                task_state.task_id,
+                msg.content,
+            )
+            self.task_states.clear_active(session.key)
+            task_state = None
+            route = TaskRouteDecision("chat", "fallback_from_misaligned_plan")
         if forced_response and task_state is not None and task_state.phase == "blocked":
             return OutboundMessage(
                 channel=msg.channel,

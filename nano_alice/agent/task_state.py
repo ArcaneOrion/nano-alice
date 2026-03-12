@@ -27,6 +27,19 @@ _TASK_HINTS = (
 _CHAT_HINTS = ("是什么", "为什么", "怎么理解", "解释", "介绍", "what is", "why", "explain")
 _REPLAN_HINTS = ("重新计划", "重排", "改计划", "换成", "其实", "不要", "replan", "instead", "change")
 _CONTINUE_HINTS = ("继续", "继续执行", "接着", "下一步", "进度", "continue", "resume", "next step", "progress")
+_QUESTION_MARKERS = (
+    "？", "?", "吗", "呢", "什么", "怎么", "为什么", "咋", "如何", "知道", "说明",
+    "介绍", "讲讲", "tell me", "what", "why", "how", "can you explain",
+)
+_EXPLICIT_TASK_PATTERNS = (
+    "帮我", "请你", "实现", "修改", "修复", "重构", "运行测试", "跑测试", "执行命令",
+    "排查", "分析代码", "创建文件", "生成文件", "发送附件", "发附件", "整理成文件",
+    "implement", "fix", "refactor", "run tests", "create file", "generate file",
+    "send attachment",
+)
+_LIGHTWEIGHT_ACTION_HINTS = (
+    "发我", "发我看看", "给我看看", "说说", "讲讲", "解释一下", "介绍一下",
+)
 
 
 def _escape_attr(value: str) -> str:
@@ -127,6 +140,20 @@ class TaskRouteDecision:
 class TaskRouter:
     """Route incoming messages into chat/task modes."""
 
+    @staticmethod
+    def _looks_like_question(text: str) -> bool:
+        if any(marker in text for marker in _QUESTION_MARKERS):
+            return True
+        return text.endswith(("吗", "呢", "?", "？"))
+
+    @staticmethod
+    def _has_explicit_task_intent(text: str) -> bool:
+        return any(hint in text for hint in _EXPLICIT_TASK_PATTERNS)
+
+    @staticmethod
+    def _has_lightweight_action(text: str) -> bool:
+        return any(hint in text for hint in _LIGHTWEIGHT_ACTION_HINTS)
+
     def decide(self, content: str, active_task: TaskState | None = None) -> TaskRouteDecision:
         text = content.strip().lower()
         if active_task:
@@ -135,11 +162,21 @@ class TaskRouter:
             if any(hint in text for hint in _CONTINUE_HINTS):
                 return TaskRouteDecision("task", "active_task_continues", True)
 
+        is_question = self._looks_like_question(text)
+        has_explicit_task = self._has_explicit_task_intent(text)
+        has_lightweight_action = self._has_lightweight_action(text)
+
+        if is_question and not has_explicit_task:
+            return TaskRouteDecision("chat", "question_priority")
+        if is_question and has_lightweight_action and not has_explicit_task:
+            return TaskRouteDecision("chat", "mixed_question_priority")
+        if has_explicit_task:
+            return TaskRouteDecision("task", "explicit_task_request")
         if any(hint in text for hint in _TASK_HINTS):
             return TaskRouteDecision("task", "task_like_request")
         if any(hint in text for hint in _CHAT_HINTS):
             return TaskRouteDecision("chat", "question_like_request")
-        if len(text) > 40 and any(ch in text for ch in ("。", ".", "，", ",")):
+        if len(text) > 40 and any(ch in text for ch in ("。", ".", "，", ",")) and not is_question:
             return TaskRouteDecision("task", "long_structured_request")
         return TaskRouteDecision("chat", "default_chat")
 

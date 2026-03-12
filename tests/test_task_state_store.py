@@ -80,6 +80,22 @@ def test_task_router_prefers_task_and_replan(tmp_path: Path) -> None:
     assert again.needs_replan is True
 
 
+def test_task_router_prefers_chat_for_question_like_inputs() -> None:
+    router = TaskRouter()
+
+    pure_question = router.decide("你知道你的心跳怎么运行吗")
+    assert pure_question.mode == "chat"
+
+    mixed_question = router.decide("发我你的心跳文件附件，你知道你的心跳怎么运行吗")
+    assert mixed_question.mode == "chat"
+
+    explanation = router.decide("解释一下这个机制怎么工作")
+    assert explanation.mode == "chat"
+
+    explicit_task = router.decide("帮我修改这个文件并运行测试")
+    assert explicit_task.mode == "task"
+
+
 def test_normalize_task_state_completes_done_steps_and_clears_waiting_fields(tmp_path: Path) -> None:
     store = TaskStateStore(tmp_path)
     task = store.create_new_task("cli:direct", "实现任务状态")
