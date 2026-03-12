@@ -574,6 +574,10 @@ def _setup_logging(enable_console: bool = False, console_level: str = "INFO") ->
     from loguru import logger
     from nano_alice.config.loader import get_data_dir
 
+    # Clear loguru's default stderr sink and any prior nano-alice sinks so
+    # repeated CLI/gateway setup does not duplicate every log line.
+    logger.remove()
+
     # 先确保模块启用（之前可能被 disable 过）
     logger.enable("nano_alice")
 

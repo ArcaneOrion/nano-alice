@@ -7,7 +7,7 @@ from nano_alice.bus.queue import MessageBus
 from nano_alice.channels.base import BaseChannel
 from nano_alice.channels.manager import ChannelManager
 from nano_alice.config.schema import Config, MemoryAgentConfig
-from nano_alice.providers.base import LLMProvider, LLMResponse
+from nano_alice.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 from nano_alice.session.manager import SessionManager
 
 
@@ -34,6 +34,24 @@ class FailingIntentProvider(IntentProvider):
     async def chat(self, messages, tools=None, model=None, max_tokens=4096, temperature=0.7):
         self.calls.append(messages)
         raise RuntimeError("llm down")
+
+
+class MessageToolIntentProvider(IntentProvider):
+    async def chat(self, messages, tools=None, model=None, max_tokens=4096, temperature=0.7):
+        self.calls.append(messages)
+        if not any(msg.get("role") == "tool" for msg in messages):
+            return LLMResponse(
+                content="我来直接发送提醒。",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="tool-message-1",
+                        name="message",
+                        arguments={"content": "这是通过 message 工具发送的提醒。"},
+                    )
+                ],
+                finish_reason="tool_calls",
+            )
+        return LLMResponse(content="这是通过 message 工具发送的提醒。")
 
 
 class FakeChannel(BaseChannel):
@@ -273,6 +291,52 @@ def test_due_intent_event_marks_failed_when_llm_raises(tmp_path: Path) -> None:
     assert updated.last_notified_at == ""
     assert updated.delivery_state.status == "failed"
     assert updated.delivery_state.last_error == "llm down"
+
+
+def test_due_intent_event_does_not_duplicate_when_message_tool_sends(tmp_path: Path) -> None:
+    workspace = _make_workspace(tmp_path)
+    bus = MessageBus()
+    loop = AgentLoop(
+        bus=bus,
+        provider=MessageToolIntentProvider(),
+        workspace=workspace,
+        session_manager=SessionManager(workspace),
+        memory_agent_config=MemoryAgentConfig(enabled=False),
+    )
+    intent = loop.reminder_intents.create(
+        session_key="feishu:chat1",
+        origin_channel="feishu",
+        origin_chat_id="chat1",
+        goal="提醒用户喝水",
+        why_notify="到点喝水",
+    )
+
+    response = asyncio.run(
+        loop._process_message(
+            InboundMessage(
+                channel="system",
+                sender_id="cron",
+                chat_id="feishu:chat1",
+                content="",
+                metadata={
+                    "_cron_intent_due": True,
+                    "_intent_id": intent.intent_id,
+                    "_session_key": "feishu:chat1",
+                },
+            )
+        )
+    )
+
+    queued = asyncio.run(asyncio.wait_for(bus.consume_outbound(), timeout=1.0))
+    updated = loop.reminder_intents.load(intent.intent_id)
+
+    assert response is None
+    assert queued.channel == "feishu"
+    assert queued.chat_id == "chat1"
+    assert queued.content == "这是通过 message 工具发送的提醒。"
+    assert bus.outbound_size == 0
+    assert updated is not None
+    assert updated.last_notified_at != ""
 
 
 def test_channel_manager_publishes_delivery_receipt_event() -> None:

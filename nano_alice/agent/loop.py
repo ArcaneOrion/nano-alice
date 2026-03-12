@@ -1012,6 +1012,9 @@ class AgentLoop:
             key = session_key or msg.metadata.get("_session_key") or intent.session_key
             session = self.sessions.get_or_create(key)
             self._set_tool_context(origin_channel, origin_chat_id, msg.metadata.get("message_id"))
+            if message_tool := self.tools.get("message"):
+                if isinstance(message_tool, MessageTool):
+                    message_tool.start_turn()
 
             envelope = self.context.build_prompt_envelope(
                 history=session.get_history(max_messages=self.memory_window),
@@ -1032,6 +1035,10 @@ class AgentLoop:
                     error=str(e)[:500],
                 )
                 return None
+            if message_tool := self.tools.get("message"):
+                if isinstance(message_tool, MessageTool) and message_tool._sent_in_turn:
+                    self.reminder_intents.mark_notified(intent.intent_id)
+                    return None
             final_content = (final_content or "").strip()
             self.reminder_intents.mark_notified(intent.intent_id)
             if not final_content:
