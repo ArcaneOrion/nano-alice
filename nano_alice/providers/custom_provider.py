@@ -34,8 +34,13 @@ class CustomProvider(LLMProvider):
 
     @staticmethod
     def _normalize_model_name(model: str) -> str:
-        if model.lower().startswith("openai/"):
-            return model.split("/", 1)[1]
+        if "/" not in model:
+            return model
+
+        prefix, remainder = model.split("/", 1)
+        normalized_prefix = prefix.lower().replace("-", "_")
+        if normalized_prefix in {"openai", "openai1", "openai2", "openai3", "openai_1", "openai_2", "openai_3"}:
+            return remainder
         return model
 
     def __init__(self, api_key: str = "no-key", api_base: str = "http://localhost:8000/v1", default_model: str = "default"):
