@@ -120,6 +120,18 @@ async def test_exec_tilde_path_blocked(tmp_path: Path) -> None:
     assert "[系统拦截]" in result
 
 
+@pytest.mark.parametrize("cmd", [
+    "ls 2>/dev/null",
+    "cat file.txt >/dev/null 2>&1",
+    "head -c 64 /dev/urandom | base64",
+    "echo test > /dev/stderr",
+])
+async def test_exec_safe_dev_paths_allowed(tmp_path: Path, cmd: str) -> None:
+    reg = _make_registry(str(tmp_path))
+    result = await reg.execute("exec", {"command": cmd})
+    assert result == "ok"
+
+
 async def test_exec_working_dir_outside(tmp_path: Path) -> None:
     reg = _make_registry(str(tmp_path))
     result = await reg.execute("exec", {"command": "ls", "working_dir": "/tmp"})

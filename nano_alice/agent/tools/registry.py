@@ -12,6 +12,10 @@ from nano_alice.logging_utils import summarize_tool_result
 
 _FILE_TOOLS = frozenset({"read_file", "write_file", "edit_file", "list_dir", "append_file"})
 _ABS_PATH_RE = re.compile(r"(?:^|[\s|>;])(/[^\s\"'>]+)")
+_SAFE_ABS_PATHS = frozenset({
+    "/dev/null", "/dev/zero", "/dev/urandom", "/dev/random",
+    "/dev/stdin", "/dev/stdout", "/dev/stderr",
+})
 
 
 class ToolRegistry:
@@ -129,6 +133,8 @@ class ToolRegistry:
             try:
                 resolved = Path(raw).resolve()
             except Exception:
+                continue
+            if raw in _SAFE_ABS_PATHS:
                 continue
             if not resolved.is_relative_to(self._allowed_dir):
                 reason = f"exec 命令引用了工作目录外的路径 '{raw}'"
