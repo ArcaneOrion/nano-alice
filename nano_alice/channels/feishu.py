@@ -730,11 +730,7 @@ class FeishuChannel(BaseChannel):
                     # 显示模型名称
                     model_name = msg.metadata.get("model") if msg.metadata else None
                     if model_name and not msg.metadata.get("_progress"):
-                        model_line = f"Model: {model_name}"
-                        subagent_model = msg.metadata.get("subagent_model") if msg.metadata else None
-                        if subagent_model:
-                            model_line += f" + {subagent_model}"
-                        notes.append(model_line)
+                        notes.append(f"Model: {model_name}")
 
                     if notes:
                         elements.append({"tag": "hr"})

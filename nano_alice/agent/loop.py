@@ -1835,10 +1835,8 @@ class AgentLoop:
         if token_usage and any(v > 0 for v in token_usage.values()):
             meta["token_usage"] = token_usage
 
-        # Inject model names for display
+        # Inject model name for display
         meta["model"] = self.model
-        if self.subagents.model != self.model:
-            meta["subagent_model"] = self.subagents.model
 
         continuation_scheduled = False
         if (continuation_requested or auto_continue_after_subagent) and task_state and task_state.phase == "executing":
