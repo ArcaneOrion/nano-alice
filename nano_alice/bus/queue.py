@@ -50,3 +50,22 @@ class MessageBus:
     def outbound_size(self) -> int:
         """Number of pending outbound messages."""
         return self.outbound.qsize()
+
+    def drain_task_continuations(self, task_id: str) -> int:
+        """Remove stale task continuation messages for a specific task_id."""
+        remaining: list[InboundMessage] = []
+        removed = 0
+        while not self.inbound.empty():
+            try:
+                msg = self.inbound.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if msg.metadata.get("_task_continue") and str(msg.metadata.get("_task_id", "")) == task_id:
+                removed += 1
+            else:
+                remaining.append(msg)
+        for msg in remaining:
+            self.inbound.put_nowait(msg)
+        if removed:
+            logger.debug("Drained {} stale continuations for task_id={}", removed, task_id)
+        return removed

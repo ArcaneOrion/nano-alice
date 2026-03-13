@@ -262,6 +262,7 @@ class TaskStateRenderer:
   <rule>当 mode=task 时，必须先输出或确认计划，再执行。</rule>
   <rule>当 phase=planning 时，不得声称任务已执行完成。</rule>
   <rule>当 phase=executing 时，只能执行 current_step_index 对应步骤。</rule>
+  <rule>执行阶段必须使用 task_update 工具提交步骤结果与是否继续。</rule>
   <rule>当 phase=waiting_subagent 时，必须等待对应子代理结果，不得直接跳到下一步。</rule>
   <rule>未完成当前步骤前，不得跳到后续步骤。</rule>
   <rule>只有当步骤存在 evidence 或明确结果时，才能将其标记为 done。</rule>

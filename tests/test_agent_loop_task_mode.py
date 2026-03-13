@@ -108,13 +108,8 @@ def test_process_direct_creates_task_state_and_injects_xml(tmp_path: Path) -> No
 
     assert response is not None
     assert response.metadata["mode"] == "task"
-    assert response.metadata["task_phase"] == "executing"
-    assert response.metadata["task_current_step_index"] == 2
-
-    seen_system = provider.calls[-1][0]["content"]
-    assert "<task_execution_rules>" in seen_system
-    assert "<task_state>" in seen_system
-    assert "<current_step_index>1</current_step_index>" in seen_system
+    assert response.metadata["task_phase"] == "planning"
+    assert "已生成任务计划" in response.content
 
     archived = list((workspace / "task_state" / "archive").glob("*.json"))
     active = list((workspace / "task_state" / "active").glob("*.json"))

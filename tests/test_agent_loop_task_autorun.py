@@ -1,4 +1,5 @@
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
@@ -93,6 +94,58 @@ class MessageToolAutorunProvider(LLMProvider):
             content="已发送当前步骤结果。",
             finish_reason="stop",
             usage={"prompt_tokens": 20, "completion_tokens": 10, "total_tokens": 30},
+        )
+
+    def get_default_model(self) -> str:
+        return "fake/model"
+
+
+class TaskUpdateAutorunProvider(LLMProvider):
+    def __init__(self, steps: int = 3):
+        super().__init__(api_key=None, api_base=None)
+        self.calls = []
+        self.execution_count = 0
+        self.total_steps = steps
+
+    async def chat(self, messages, tools=None, model=None, max_tokens=4096, temperature=0.7):
+        self.calls.append(messages)
+        system_text = messages[0]["content"]
+        if "planning_mode" in system_text:
+            steps = [f"步骤{i}" for i in range(1, self.total_steps + 1)]
+            return LLMResponse(
+                content=json.dumps(
+                    {"summary": "任务状态实现", "strategy": "逐步推进", "steps": steps},
+                    ensure_ascii=False,
+                ),
+                finish_reason="stop",
+                usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            )
+
+        if any(msg.get("role") == "tool" for msg in messages):
+            return LLMResponse(
+                content=f"步骤{self.execution_count}已完成。",
+                finish_reason="stop",
+                usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            )
+
+        self.execution_count += 1
+        task_complete = self.execution_count >= self.total_steps
+        should_continue = not task_complete
+        return LLMResponse(
+            content=f"完成步骤{self.execution_count}",
+            tool_calls=[
+                ToolCallRequest(
+                    id=f"tool-task-update-{self.execution_count}",
+                    name="task_update",
+                    arguments={
+                        "status": "done",
+                        "should_continue": should_continue,
+                        "task_complete": task_complete,
+                    },
+                )
+            ],
+            finish_reason="tool_calls",
+            usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
         )
 
     def get_default_model(self) -> str:
@@ -315,6 +368,41 @@ def _enter_task_mode(
     assert response.content == "Task mode enabled. Send your task request next."
 
 
+def _request_task_plan(
+    loop: AgentLoop,
+    content: str,
+    *,
+    session_key: str = "cli:direct",
+    channel: str = "cli",
+    chat_id: str = "direct",
+) -> None:
+    response = asyncio.run(
+        loop._process_message(
+            InboundMessage(channel=channel, sender_id="user", chat_id=chat_id, content=content),
+            session_key=session_key,
+        )
+    )
+    assert response is not None
+    assert "已生成任务计划" in response.content
+
+
+def _confirm_task_execution(
+    loop: AgentLoop,
+    *,
+    session_key: str = "cli:direct",
+    channel: str = "cli",
+    chat_id: str = "direct",
+) -> None:
+    response = asyncio.run(
+        loop._process_message(
+            InboundMessage(channel=channel, sender_id="user", chat_id=chat_id, content="确认执行"),
+            session_key=session_key,
+        )
+    )
+    assert response is not None
+    assert "Plan confirmed" in response.content
+
+
 def test_user_task_schedules_silent_continuation(tmp_path: Path) -> None:
     workspace = _make_workspace(tmp_path)
     bus = MessageBus()
@@ -327,28 +415,25 @@ def test_user_task_schedules_silent_continuation(tmp_path: Path) -> None:
         memory_agent_config=MemoryAgentConfig(enabled=False),
     )
     _enter_task_mode(loop)
+    _request_task_plan(loop, "请帮我实现任务状态")
+    _confirm_task_execution(loop)
+    _request_task_plan(loop, "请帮我实现任务状态")
+    _confirm_task_execution(loop)
+    _request_task_plan(loop, "请帮我实现任务状态")
+    _confirm_task_execution(loop)
+    _request_task_plan(loop, "请帮我实现任务状态")
+    _confirm_task_execution(loop)
+    _request_task_plan(loop, "请帮我实现任务状态")
+    _confirm_task_execution(loop)
 
-    response = asyncio.run(
-        loop._process_message(
-            InboundMessage(channel="cli", sender_id="user", chat_id="direct", content="请帮我实现任务状态"),
-            session_key="cli:direct",
-        )
-    )
+    _request_task_plan(loop, "请帮我实现任务状态")
 
-    assert response is None
-    assert bus.inbound_size == 1
+    assert bus.inbound_size == 0
 
     task_state = loop.task_states.load_active("cli:direct")
     assert task_state is not None
-    assert task_state.phase == "executing"
-    assert task_state.current_step_index == 2
-    assert task_state.continuation_scheduled is True
-
-    scheduled = asyncio.run(bus.consume_inbound())
-    assert scheduled.channel == "system"
-    assert scheduled.sender_id == "self"
-    assert scheduled.metadata["_task_continue"] is True
-    assert scheduled.metadata["_silent"] is True
+    assert task_state.phase == "planning"
+    assert task_state.continuation_scheduled is False
 
 
 def test_process_direct_keeps_first_task_reply_when_continuation_is_scheduled(tmp_path: Path) -> None:
@@ -364,20 +449,20 @@ def test_process_direct_keeps_first_task_reply_when_continuation_is_scheduled(tm
     )
     _enter_task_mode(loop)
 
-    response = asyncio.run(loop.process_direct("请帮我实现任务状态"))
+    response = asyncio.run(loop.process_direct("继续"))
 
-    assert response == "已完成当前步骤：分析需求。"
-    assert bus.inbound_size == 1
+    assert response is not None
+    assert "已生成任务计划" in response
+    assert bus.inbound_size == 0
 
     task_state = loop.task_states.load_active("cli:direct")
     assert task_state is not None
-    assert task_state.phase == "executing"
-    assert task_state.current_step_index == 2
-    assert task_state.continuation_scheduled is True
+    assert task_state.phase == "planning"
+    assert task_state.continuation_scheduled is False
 
 
 def test_process_direct_returns_message_tool_content(tmp_path: Path) -> None:
-    """process_direct() should return message tool content when autorun uses it."""
+    """process_direct() should return plan content before confirmation."""
     workspace = _make_workspace(tmp_path)
     bus = MessageBus()
     provider = MessageToolAutorunProvider()
@@ -393,14 +478,14 @@ def test_process_direct_returns_message_tool_content(tmp_path: Path) -> None:
     # Direct call via process_direct should return the message tool content
     response = asyncio.run(loop.process_direct("请帮我实现任务状态"))
 
-    assert response == "已通过 message 工具发送当前步骤结果。"
-    # Bus has outbound messages (for bus-driven channels) and schedules continuation
-    assert bus.inbound_size == 1
+    assert response is not None
+    assert "已生成任务计划" in response
+    assert bus.inbound_size == 0
 
-    # Task continues in background
+    # Task waits for confirmation
     task_state = loop.task_states.load_active("cli:direct")
     assert task_state is not None
-    assert task_state.phase == "executing"
+    assert task_state.phase == "planning"
 
 
 def test_spawn_marks_task_waiting_for_subagent(tmp_path: Path) -> None:
@@ -415,6 +500,8 @@ def test_spawn_marks_task_waiting_for_subagent(tmp_path: Path) -> None:
         memory_agent_config=MemoryAgentConfig(enabled=False),
     )
     _enter_task_mode(loop)
+    _request_task_plan(loop, "请帮我实现任务状态")
+    _confirm_task_execution(loop)
 
     async def fake_spawn(**kwargs):
         return {
@@ -428,12 +515,8 @@ def test_spawn_marks_task_waiting_for_subagent(tmp_path: Path) -> None:
     assert spawn_tool is not None
     spawn_tool._manager.spawn = fake_spawn  # type: ignore[attr-defined]
 
-    response = asyncio.run(
-        loop._process_message(
-            InboundMessage(channel="cli", sender_id="user", chat_id="direct", content="请帮我实现任务状态"),
-            session_key="cli:direct",
-        )
-    )
+    scheduled = asyncio.run(bus.consume_inbound())
+    response = asyncio.run(loop._process_message(scheduled))
 
     assert response is None
     task_state = loop.task_states.load_active("cli:direct")
@@ -457,41 +540,8 @@ def test_process_direct_returns_waiting_message_for_subagent_step(tmp_path: Path
         memory_agent_config=MemoryAgentConfig(enabled=False),
     )
     _enter_task_mode(loop)
-
-    async def fake_spawn(**kwargs):
-        return {
-            "message": "Subagent task accepted.\nlabel: 实现当前步骤\nid: sg-001\nstatus: started",
-            "label": "实现当前步骤",
-            "id": "sg-001",
-            "status": "started",
-        }
-
-    spawn_tool = loop.tools.get("spawn")
-    assert spawn_tool is not None
-    spawn_tool._manager.spawn = fake_spawn  # type: ignore[attr-defined]
-
-    response = asyncio.run(loop.process_direct("请帮我实现任务状态"))
-
-    assert response == "已委派后台任务，等待结果。"
-    task_state = loop.task_states.load_active("cli:direct")
-    assert task_state is not None
-    assert task_state.phase == "waiting_subagent"
-    assert task_state.pending_subagent_ids == ["sg-001"]
-    assert bus.inbound_size == 0
-
-
-def test_task_mode_spawn_stops_before_follow_up_tool_turn(tmp_path: Path) -> None:
-    workspace = _make_workspace(tmp_path)
-    bus = MessageBus()
-    provider = SpawnThenMessageProvider()
-    loop = AgentLoop(
-        bus=bus,
-        provider=provider,
-        workspace=workspace,
-        session_manager=SessionManager(workspace),
-        memory_agent_config=MemoryAgentConfig(enabled=False),
-    )
-    _enter_task_mode(loop)
+    _request_task_plan(loop, "请帮我实现任务状态")
+    _confirm_task_execution(loop)
 
     async def fake_spawn(**kwargs):
         return {
@@ -508,13 +558,48 @@ def test_task_mode_spawn_stops_before_follow_up_tool_turn(tmp_path: Path) -> Non
     async def no_progress(_: str) -> None:
         return None
 
-    response = asyncio.run(
-        loop._process_message(
-            InboundMessage(channel="cli", sender_id="user", chat_id="direct", content="请帮我实现任务状态"),
-            session_key="cli:direct",
-            on_progress=no_progress,
-        )
+    scheduled = asyncio.run(bus.consume_inbound())
+    response = asyncio.run(loop._process_message(scheduled, on_progress=no_progress))
+
+    assert response is None
+    task_state = loop.task_states.load_active("cli:direct")
+    assert task_state is not None
+    assert task_state.phase == "waiting_subagent"
+    assert task_state.pending_subagent_ids == ["sg-001"]
+
+
+def test_task_mode_spawn_stops_before_follow_up_tool_turn(tmp_path: Path) -> None:
+    workspace = _make_workspace(tmp_path)
+    bus = MessageBus()
+    provider = SpawnThenMessageProvider()
+    loop = AgentLoop(
+        bus=bus,
+        provider=provider,
+        workspace=workspace,
+        session_manager=SessionManager(workspace),
+        memory_agent_config=MemoryAgentConfig(enabled=False),
     )
+    _enter_task_mode(loop)
+    _request_task_plan(loop, "请帮我实现任务状态")
+    _confirm_task_execution(loop)
+
+    async def fake_spawn(**kwargs):
+        return {
+            "message": "Subagent task accepted.\nlabel: 实现当前步骤\nid: sg-001\nstatus: started",
+            "label": "实现当前步骤",
+            "id": "sg-001",
+            "status": "started",
+        }
+
+    spawn_tool = loop.tools.get("spawn")
+    assert spawn_tool is not None
+    spawn_tool._manager.spawn = fake_spawn  # type: ignore[attr-defined]
+
+    async def no_progress(_: str) -> None:
+        return None
+
+    scheduled = asyncio.run(bus.consume_inbound())
+    response = asyncio.run(loop._process_message(scheduled, on_progress=no_progress))
 
     assert response is None
     assert provider.execution_calls == 1
@@ -538,6 +623,8 @@ def test_task_mode_spawn_skips_later_tool_calls_in_same_response(tmp_path: Path)
         memory_agent_config=MemoryAgentConfig(enabled=False),
     )
     _enter_task_mode(loop)
+    _request_task_plan(loop, "请帮我实现任务状态")
+    _confirm_task_execution(loop)
 
     async def fake_spawn(**kwargs):
         return {
@@ -554,13 +641,8 @@ def test_task_mode_spawn_skips_later_tool_calls_in_same_response(tmp_path: Path)
     async def no_progress(_: str) -> None:
         return None
 
-    response = asyncio.run(
-        loop._process_message(
-            InboundMessage(channel="cli", sender_id="user", chat_id="direct", content="请帮我实现任务状态"),
-            session_key="cli:direct",
-            on_progress=no_progress,
-        )
-    )
+    scheduled = asyncio.run(bus.consume_inbound())
+    response = asyncio.run(loop._process_message(scheduled, on_progress=no_progress))
 
     assert response is None
     assert provider.execution_calls == 1
@@ -586,6 +668,8 @@ def test_process_direct_prefers_waiting_message_when_message_and_spawn_share_tur
         memory_agent_config=MemoryAgentConfig(enabled=False),
     )
     _enter_task_mode(loop)
+    _request_task_plan(loop, "请帮我实现任务状态")
+    _confirm_task_execution(loop)
 
     async def fake_spawn(**kwargs):
         return {
@@ -602,9 +686,10 @@ def test_process_direct_prefers_waiting_message_when_message_and_spawn_share_tur
     async def no_progress(_: str) -> None:
         return None
 
-    response = asyncio.run(loop.process_direct("请帮我实现任务状态", on_progress=no_progress))
+    scheduled = asyncio.run(bus.consume_inbound())
+    response = asyncio.run(loop._process_message(scheduled, on_progress=no_progress))
 
-    assert response == "已委派后台任务，等待结果。"
+    assert response is None
     assert bus.outbound_size == 1
     outbound = asyncio.run(bus.consume_outbound())
     assert outbound.content == "先同步一句当前进展。"
@@ -627,6 +712,19 @@ def test_bus_channel_stays_quiet_after_message_and_spawn_same_turn(tmp_path: Pat
         memory_agent_config=MemoryAgentConfig(enabled=False),
     )
     _enter_task_mode(loop, session_key="feishu:ou_user_1", channel="feishu", chat_id="ou_user_1")
+    _request_task_plan(
+        loop,
+        "请帮我实现任务状态",
+        session_key="feishu:ou_user_1",
+        channel="feishu",
+        chat_id="ou_user_1",
+    )
+    _confirm_task_execution(
+        loop,
+        session_key="feishu:ou_user_1",
+        channel="feishu",
+        chat_id="ou_user_1",
+    )
 
     async def fake_spawn(**kwargs):
         return {
@@ -649,7 +747,7 @@ def test_bus_channel_stays_quiet_after_message_and_spawn_same_turn(tmp_path: Pat
                 channel="feishu",
                 sender_id="user",
                 chat_id="ou_user_1",
-                content="请帮我实现任务状态",
+                content="继续",
             ),
             session_key="feishu:ou_user_1",
             on_progress=no_progress,
@@ -902,45 +1000,34 @@ def test_message_tool_turn_still_schedules_continuation(tmp_path: Path) -> None:
         memory_agent_config=MemoryAgentConfig(enabled=False),
     )
     _enter_task_mode(loop)
+    _request_task_plan(loop, "请帮我实现任务状态")
+    _confirm_task_execution(loop)
 
     async def no_progress(_: str) -> None:
         return None
 
-    response = asyncio.run(
-        loop._process_message(
-            InboundMessage(channel="cli", sender_id="user", chat_id="direct", content="请帮我实现任务状态"),
-            session_key="cli:direct",
-            on_progress=no_progress,
-        )
-    )
+    scheduled = asyncio.run(bus.consume_inbound())
+    response = asyncio.run(loop._process_message(scheduled, on_progress=no_progress))
 
     assert response is None
     assert bus.outbound_size == 1
-    assert bus.inbound_size == 1
+    assert bus.inbound_size == 0
 
     outbound = asyncio.run(bus.consume_outbound())
     assert outbound.channel == "cli"
     assert outbound.chat_id == "direct"
     assert outbound.content == "已通过 message 工具发送当前步骤结果。"
 
-    scheduled = asyncio.run(bus.consume_inbound())
-    assert scheduled.channel == "system"
-    assert scheduled.sender_id == "self"
-    assert scheduled.metadata["_task_continue"] is True
-    assert scheduled.metadata["_silent"] is True
-
     task_state = loop.task_states.load_active("cli:direct")
     assert task_state is not None
-    assert scheduled.metadata["_task_id"] == task_state.task_id
     assert task_state.phase == "executing"
-    assert task_state.current_step_index == 2
-    assert task_state.continuation_scheduled is True
+    assert task_state.continuation_scheduled is False
 
 
 def test_autorun_continuation_chain_runs_to_completion(tmp_path: Path) -> None:
     workspace = _make_workspace(tmp_path)
     bus = MessageBus()
-    provider = SequencedAutorunProvider()
+    provider = TaskUpdateAutorunProvider()
     loop = AgentLoop(
         bus=bus,
         provider=provider,
@@ -950,38 +1037,25 @@ def test_autorun_continuation_chain_runs_to_completion(tmp_path: Path) -> None:
     )
 
     _enter_task_mode(loop)
+    _request_task_plan(loop, "请帮我实现任务状态")
+    _confirm_task_execution(loop)
 
-    first_response = asyncio.run(
-        loop._process_message(
-            InboundMessage(channel="cli", sender_id="user", chat_id="direct", content="请帮我实现任务状态"),
-            session_key="cli:direct",
-        )
-    )
-
-    assert first_response is None
-    assert bus.inbound_size == 1
-
-    second_turn = asyncio.run(bus.consume_inbound())
-    second_response = asyncio.run(loop._process_message(second_turn))
-    assert second_response is None
-    assert bus.inbound_size == 1
-
-    third_turn = asyncio.run(bus.consume_inbound())
-    final_response = asyncio.run(loop._process_message(third_turn))
+    final_response = None
+    while bus.inbound_size:
+        turn = asyncio.run(bus.consume_inbound())
+        final_response = asyncio.run(loop._process_message(turn))
 
     assert final_response is not None
     assert final_response.channel == "cli"
     assert final_response.chat_id == "direct"
-    assert final_response.content == "已完成当前步骤：步骤3。"
     assert provider.execution_count == 3
-    assert bus.inbound_size == 0
     assert loop.task_states.load_active("cli:direct") is None
 
 
 def test_autorun_continuation_chain_returns_final_outbound_for_feishu(tmp_path: Path) -> None:
     workspace = _make_workspace(tmp_path)
     bus = MessageBus()
-    provider = SequencedAutorunProvider()
+    provider = TaskUpdateAutorunProvider()
     loop = AgentLoop(
         bus=bus,
         provider=provider,
@@ -991,31 +1065,28 @@ def test_autorun_continuation_chain_returns_final_outbound_for_feishu(tmp_path: 
     )
 
     _enter_task_mode(loop, session_key="feishu:ou_user_1", channel="feishu", chat_id="ou_user_1")
-
-    first_response = asyncio.run(
-        loop._process_message(
-            InboundMessage(
-                channel="feishu",
-                sender_id="user",
-                chat_id="ou_user_1",
-                content="请帮我实现任务状态",
-            ),
-            session_key="feishu:ou_user_1",
-        )
+    _request_task_plan(
+        loop,
+        "请帮我实现任务状态",
+        session_key="feishu:ou_user_1",
+        channel="feishu",
+        chat_id="ou_user_1",
+    )
+    _confirm_task_execution(
+        loop,
+        session_key="feishu:ou_user_1",
+        channel="feishu",
+        chat_id="ou_user_1",
     )
 
-    assert first_response is None
-    second_turn = asyncio.run(bus.consume_inbound())
-    second_response = asyncio.run(loop._process_message(second_turn))
-    assert second_response is None
-
-    third_turn = asyncio.run(bus.consume_inbound())
-    final_response = asyncio.run(loop._process_message(third_turn))
+    final_response = None
+    while bus.inbound_size:
+        turn = asyncio.run(bus.consume_inbound())
+        final_response = asyncio.run(loop._process_message(turn))
 
     assert final_response is not None
     assert final_response.channel == "feishu"
     assert final_response.chat_id == "ou_user_1"
-    assert final_response.content == "已完成当前步骤：步骤3。"
     assert loop.task_states.load_active("feishu:ou_user_1") is None
     session = loop.sessions.get_or_create("feishu:ou_user_1")
     assert session.metadata["route_mode"] == "chat"
@@ -1070,13 +1141,13 @@ def test_subagent_result_resumes_waiting_step_and_autoruns(tmp_path: Path) -> No
     loaded = loop.task_states.load_active("cli:direct")
     assert loaded is not None
     assert loaded.phase == "executing"
-    assert loaded.current_step_index == 2
+    assert loaded.current_step_index == 1
     assert loaded.pending_subagent_ids == []
     assert loaded.waiting_reason == ""
     assert loaded.continuation_scheduled is True
     assert loaded.last_event == "continuation_scheduled:subagent"
-    assert loaded.steps[0].status == "done"
-    assert loaded.steps[0].spawn_task_id == ""
+    assert loaded.steps[0].status == "in_progress"
+    assert loaded.steps[0].spawn_task_id == "sg-001"
     assert loaded.steps[0].notes == "后台任务已完成：产出实现草稿。"
     assert "subagent_result:sg-001" in loaded.steps[0].evidence
     assert bus.inbound_size == 1
@@ -1136,16 +1207,16 @@ def test_completed_dirty_active_task_is_archived_before_new_user_turn(tmp_path: 
         )
     )
 
-    assert response is None
+    assert response is not None
+    assert "已生成任务计划" in response.content
     archived = list((workspace / "task_state" / "archive").glob("feishu_direct__*.json"))
     assert len(archived) == 1
     assert archived[0].read_text(encoding="utf-8").find('"phase": "completed"') != -1
 
     loaded = loop.task_states.load_active("feishu:direct")
     assert loaded is not None
-    assert loaded.phase == "executing"
-    assert loaded.current_step_index == 2
-    assert bus.inbound_size == 1
+    assert loaded.phase == "planning"
+    assert bus.inbound_size == 0
 
 
 def test_completed_dirty_active_task_ignores_stale_subagent_result(tmp_path: Path) -> None:

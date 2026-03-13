@@ -34,6 +34,7 @@ from nano_alice.agent.tools.message import MessageTool
 from nano_alice.agent.tools.registry import ToolRegistry
 from nano_alice.agent.tools.shell import ExecTool
 from nano_alice.agent.tools.spawn import SpawnTool
+from nano_alice.agent.tools.task_update import TaskUpdateTool
 from nano_alice.agent.tools.web import WebFetchTool, make_search_tool
 from nano_alice.bus.events import DeliveryReceipt, InboundMessage, OutboundMessage
 from nano_alice.bus.queue import MessageBus
@@ -230,6 +231,7 @@ class AgentLoop:
         )
         self.tools.register(WebFetchTool())
         self.tools.register(MessageTool(send_callback=self.bus.publish_outbound))
+        self.tools.register(TaskUpdateTool(store=self.task_states))
         self.tools.register(SpawnTool(manager=self.subagents))
         if self.cron_service:
             self.tools.register(CronTool(self.cron_service))
@@ -302,6 +304,10 @@ class AgentLoop:
             if isinstance(cron_tool, CronTool):
                 cron_tool.set_context(channel, chat_id)
 
+        if task_update_tool := self.tools.get("task_update"):
+            if isinstance(task_update_tool, TaskUpdateTool):
+                task_update_tool.set_context(session_key=session_key, task_id=task_id)
+
     @staticmethod
     def _parse_origin_chat(chat_id: str) -> tuple[str, str]:
         if ":" in chat_id:
@@ -325,6 +331,43 @@ class AgentLoop:
             "If yes, write the exact user-facing message. "
             "If no, return an empty response."
         )
+
+    async def _confirm_and_execute_task(
+        self, active_task: TaskState, *, msg: InboundMessage, session_key: str
+    ) -> OutboundMessage:
+        active_task.phase = "executing"
+        active_task.last_event = "task_confirmed"
+        self.task_states.save_active(active_task)
+        await self._publish_task_continuation(
+            active_task,
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            session_key=session_key,
+            reason=msg.sender_id,
+        )
+        return OutboundMessage(
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            content="Plan confirmed. Starting execution.",
+        )
+
+    @staticmethod
+    def _is_task_confirm_message(text: str) -> bool:
+        lowered = text.strip().lower()
+        confirm_hints = (
+            "确认执行",
+            "开始执行",
+            "执行吧",
+            "开始吧",
+            "confirm",
+            "proceed",
+            "go ahead",
+            "run it",
+        )
+        negative_hints = ("不", "别", "don't", "not", "cancel", "取消")
+        if any(neg in lowered for neg in negative_hints):
+            return False
+        return any(hint in lowered for hint in confirm_hints)
 
     def _update_task_delivery_fact(
         self,
@@ -355,7 +398,7 @@ class AgentLoop:
         attachments = receipt.get("attachment_names") or []
         attachments_text = ", ".join(str(name) for name in attachments if name) or "(none)"
         lines = [
-            f"source=system",
+            "source=system",
             f"channel={receipt.get('channel') or '-'}",
             f"chat_id={receipt.get('chat_id') or '-'}",
             f"status={receipt.get('status') or '-'}",
@@ -368,6 +411,21 @@ class AgentLoop:
         if receipt.get("error"):
             lines.append(f"error={receipt.get('error')}")
         return "\n    ".join(lines)
+
+    @staticmethod
+    def _format_task_plan(task_state: TaskState) -> str:
+        steps = []
+        for step in task_state.steps:
+            steps.append(f"{step.index}. {step.title}")
+        steps_text = "\n".join(steps) if steps else "(no steps)"
+        return (
+            "已生成任务计划，请确认后再执行。\n\n"
+            f"任务目标：{task_state.goal}\n"
+            f"计划版本：{task_state.plan_version}\n\n"
+            "步骤：\n"
+            f"{steps_text}\n\n"
+            "回复“确认执行”或使用 /task-confirm 开始执行。"
+        )
 
     @staticmethod
     def _build_internal_event_text(msg: InboundMessage, task_state: TaskState | None) -> str | None:
@@ -693,6 +751,20 @@ class AgentLoop:
             }
         return None
 
+    def _maybe_extract_task_update(self, tool_events: list[dict[str, Any]]) -> dict[str, Any] | None:
+        for event in reversed(tool_events):
+            if event.get("name") != "task_update":
+                continue
+            raw = event.get("result") or ""
+            if isinstance(raw, dict):
+                return raw
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError:
+                logger.warning("Failed to parse task_update result: {}", str(raw)[:200])
+                return {"ok": False}
+        return None
+
     def _should_auto_continue(self, task_state: TaskState | None) -> tuple[bool, str]:
         if task_state is None:
             return False, "no_task"
@@ -816,6 +888,8 @@ class AgentLoop:
         msg: InboundMessage,
         active_task: TaskState | None,
         route: TaskRouteDecision,
+        *,
+        internal: bool = False,
     ) -> TaskState | None:
         if route.mode != "task":
             return None
@@ -823,6 +897,25 @@ class AgentLoop:
             task_state = self.task_states.create_new_task(
                 session_key=session_key,
                 goal=self._build_task_goal(msg, active_task),
+                summary=msg.content,
+            )
+            task_state.last_event = "task_created"
+            self.task_states.save_active(task_state)
+            return task_state
+        if not internal and active_task.phase == "executing" and route.reason not in {
+            "active_task_continues",
+            "user_requested_replan",
+        }:
+            active_task.status = "cancelled"
+            active_task.continuation_scheduled = False
+            active_task.last_event = "task_superseded"
+            sync_task_pointers(active_task)
+            self.task_states.save_active(active_task)
+            self.bus.drain_task_continuations(active_task.task_id)
+            self.task_states.archive_active(session_key)
+            task_state = self.task_states.create_new_task(
+                session_key=session_key,
+                goal=self._build_task_goal(msg, None),
                 summary=msg.content,
             )
             task_state.last_event = "task_created"
@@ -1238,7 +1331,17 @@ class AgentLoop:
             logger.info("Processing system message from {}", msg.sender_id)
             key = f"{channel}:{chat_id}"
             session = self.sessions.get_or_create(key)
-            self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
+            task_state = self.task_states.load_active(key)
+            task_state = self._normalize_task_state(task_state, context="system_load")
+            self._set_tool_context(
+                channel,
+                chat_id,
+                msg.metadata.get("message_id"),
+                session_key=key,
+                task_id=task_state.task_id if task_state is not None else "",
+            )
+            task_state_xml = self.task_renderer.render_task_state_xml(task_state)
+            internal_event_text = self._build_internal_event_text(msg, task_state)
             envelope = self.context.build_prompt_envelope(
                 history=session.get_history(max_messages=self.memory_window),
                 current_message=msg.content,
@@ -1246,6 +1349,8 @@ class AgentLoop:
                 chat_id=chat_id,
                 today_recall=None,
                 task_rules_xml=self.task_renderer.render_task_rules_xml(),
+                task_state_xml=task_state_xml,
+                internal_event_text=internal_event_text,
             )
             messages = self.context.render_messages(envelope)
             final_content, _, _, _, _ = await self._run_agent_loop(messages)
@@ -1304,10 +1409,27 @@ class AgentLoop:
                     "🐈 nano-alice commands:\n"
                     "/new — Start a new conversation\n"
                     "/task — Enter task mode for your next request\n"
+                    "/task-confirm — Confirm the latest plan and start execution\n"
                     "/chat — Return to normal chat mode\n"
                     "/memory — Reconcile existing memory files\n"
                     "/help — Show available commands"
                 ),
+            )
+        if cmd == "/task-confirm":
+            if active_task is None:
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content="No active task plan to confirm.",
+                )
+            if active_task.phase not in {"planning", "replanning"}:
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content="Task is already executing or completed.",
+                )
+            return await self._confirm_and_execute_task(
+                active_task, msg=msg, session_key=session.key
             )
         if cmd == "/task":
             if active_task is not None:
@@ -1337,6 +1459,12 @@ class AgentLoop:
                 chat_id=msg.chat_id,
                 content=self._format_memory_maintenance_result(result),
             )
+
+        if active_task is not None and active_task.phase in {"planning", "replanning"}:
+            if self._is_task_confirm_message(msg.content):
+                return await self._confirm_and_execute_task(
+                    active_task, msg=msg, session_key=session.key
+                )
 
         if len(session.messages) > self.memory_window and session.key not in self._consolidating:
             self._consolidating.add(session.key)
@@ -1376,6 +1504,7 @@ class AgentLoop:
             active_task.last_event = "continuation_resumed"
             self.task_states.save_active(active_task)
         forced_response: str | None = None
+        auto_continue_after_subagent = False
         if msg.metadata.get("_subagent_result"):
             active_task, forced_response = self._resume_waiting_step_from_subagent(
                 active_task,
@@ -1386,12 +1515,24 @@ class AgentLoop:
             if active_task is None and forced_response is None:
                 return None
             active_task = self._normalize_task_state(active_task, context="post_subagent_result")
+            if active_task is not None and forced_response is None:
+                auto_continue_after_subagent = True
         route = self._decide_route(session, msg, active_task)
         is_new_task = route.mode == "task" and active_task is None
-        task_state = self._maybe_start_task(session.key, msg, active_task, route)
+        task_state = self._maybe_start_task(
+            session.key, msg, active_task, route, internal=internal_task_event
+        )
         if task_state and task_state.phase in {"planning", "replanning"}:
             task_state = await self._plan_task(session, msg, task_state)
+            task_state.phase = "planning"
+            self.task_states.save_active(task_state)
             self._set_session_route_mode(session, mode="task", task_entry_armed=False)
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=self._format_task_plan(task_state),
+                metadata={"mode": "task", "task_phase": task_state.phase},
+            )
         if is_new_task and task_state is not None and self._plan_looks_misaligned(msg.content, task_state):
             logger.warning(
                 "Discarding misaligned task plan: session_key={} task_id={} goal={}",
@@ -1522,22 +1663,23 @@ class AgentLoop:
                     task_state.last_user_delivery_attachments = list(message_tool._last_sent_media)
                     self.task_states.save_active(task_state)
 
-        step_before = self._get_current_step(task_state)
-        previous_step_index = step_before.index if step_before is not None else None
         spawn_info = self._maybe_extract_spawn_result(tool_events)
-        step_finished = False
+        task_update = self._maybe_extract_task_update(tool_events)
         completed_task = False
-        if spawn_info is not None:
+        continuation_requested = False
+        # task_update 优先于 spawn：同一轮同时出现时，以显式 task_update 为准
+        if task_update is not None:
+            task_state = self.task_states.load_active(session.key)
+            continuation_requested = bool(task_update.get("should_continue"))
+            completed_task = bool(task_update.get("task_complete")) or (
+                task_state is None or task_state.phase == "completed"
+            )
+        elif spawn_info is not None:
             task_state = self._mark_step_waiting_subagent(
                 task_state,
                 spawn_info["spawn_task_id"],
                 spawn_info["result"],
             )
-        else:
-            task_state = self._complete_current_step(task_state, final_content, task_evidence)
-            completed_task = step_before is not None and task_state is None
-            if previous_step_index is not None:
-                step_finished = task_state is None or task_state.current_step_index != previous_step_index
         task_state = self._normalize_task_state(task_state, context="post_step")
         if completed_task:
             self._reset_session_to_chat_mode(session)
@@ -1602,7 +1744,7 @@ class AgentLoop:
             meta["token_usage"] = token_usage
 
         continuation_scheduled = False
-        if step_finished and task_state and task_state.phase == "executing":
+        if (continuation_requested or auto_continue_after_subagent) and task_state and task_state.phase == "executing":
             continuation_scheduled = await self._publish_task_continuation(
                 task_state,
                 channel=msg.channel,
