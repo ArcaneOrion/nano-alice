@@ -515,7 +515,7 @@ def _make_memory_provider(config: Config):
         )
 
     # Model set but no explicit credentials → auto-match from providers
-    return _make_provider(config, memory_cfg.model, memory_cfg.provider or None)
+    return _make_provider(config, memory_cfg.model, None)
 
 
 def _resolve_default_agent_model(config: Config) -> str:
@@ -535,8 +535,7 @@ def _make_subagent_provider(config: Config, inherited_model: str | None = None):
     subagent_cfg = config.agents.subagent
     configured_models = [candidate for candidate in subagent_cfg.models if candidate]
     configured_model = subagent_cfg.model.strip() if subagent_cfg.model else ""
-    configured_provider = ""  # auto-match from model
-    has_explicit_subagent_config = bool(configured_provider or configured_model or configured_models)
+    has_explicit_subagent_config = bool(configured_model or configured_models)
 
     if not has_explicit_subagent_config:
         return None
@@ -548,9 +547,9 @@ def _make_subagent_provider(config: Config, inherited_model: str | None = None):
     fallback_models = configured_models if configured_models else [primary_model]
 
     if configured_models:
-        primary_provider = _make_provider(config, primary_model, configured_provider or None)
+        primary_provider = _make_provider(config, primary_model, None)
         fallback_providers = [
-            _make_provider(config, candidate, configured_provider or None)
+            _make_provider(config, candidate, None)
             for candidate in configured_models
             if candidate != primary_model
         ]
@@ -560,7 +559,7 @@ def _make_subagent_provider(config: Config, inherited_model: str | None = None):
             fallback_timeout_seconds=float(subagent_cfg.fallback_timeout_seconds),
         )
 
-    return _make_provider(config, primary_model, configured_provider or None)
+    return _make_provider(config, primary_model, None)
 
 
 def _setup_logging(enable_console: bool = False, console_level: str = "INFO") -> None:

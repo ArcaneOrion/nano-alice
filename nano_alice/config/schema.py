@@ -204,7 +204,6 @@ class MemoryAgentConfig(Base):
     """Memory subagent configuration."""
 
     enabled: bool = True
-    provider: str = ""  # empty = auto-match from model
     model: str = ""  # empty = use main agent model
     api_key: str = ""  # empty = auto-match from providers
     api_base: str = ""  # empty = auto-match from providers
