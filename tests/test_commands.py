@@ -226,32 +226,6 @@ def test_make_provider_uses_custom_provider_for_openai_with_custom_api_base():
     assert provider.api_base == "https://example.com/v1"
 
 
-def test_explicit_provider_name_overrides_model_keyword_matching():
-    config = Config()
-    config.agents.defaults.provider = "openai"
-    config.agents.defaults.model = "gpt-5.1-codex"
-    config.providers.openai.api_key = "sk-openai"
-    config.providers.openai_codex.api_key = "sk-codex"
-    config.providers.openai_codex.api_base = "https://example.com/v1"
-
-    assert config.get_provider_name() == "openai"
-
-
-def test_make_provider_uses_explicit_openai_codex_route():
-    config = Config()
-    config.agents.defaults.provider = "openaiCodex"
-    config.agents.defaults.model = "gpt-5.4"
-    config.providers.openai_codex.api_key = "sk-test"
-    config.providers.openai_codex.api_base = "https://example.com/v1"
-
-    provider = _make_provider(config)
-
-    assert isinstance(provider, OpenAICodexProvider)
-    assert provider.default_model == "gpt-5.4"
-    assert provider.api_key == "sk-test"
-    assert provider.api_base == "https://example.com/v1"
-
-
 def test_config_matches_explicit_openai_route_prefix():
     config = Config()
     config.agents.defaults.model = "openai2/gpt-5.4"
@@ -358,33 +332,6 @@ def test_make_subagent_provider_builds_rotating_pool_from_configured_models():
     assert provider.primary_provider.api_base == "https://route-1.example.com/v1"
     assert [child.api_base for child in provider.fallback_providers] == ["https://route-2.example.com/v1"]
     assert provider.fallback_timeout_seconds == 9.0
-
-
-def test_make_subagent_provider_inherits_model_for_explicit_provider():
-    config = Config()
-    config.agents.subagent.provider = "openai_2"
-    config.providers.openai_2.api_key = "sk-route-2"
-    config.providers.openai_2.api_base = "https://route-2.example.com/v1"
-
-    provider = _make_subagent_provider(config, inherited_model="openai/gpt-5.4-mini")
-
-    assert isinstance(provider, CustomProvider)
-    assert provider.default_model == "gpt-5.4-mini"
-    assert provider.api_base == "https://route-2.example.com/v1"
-
-
-def test_make_subagent_provider_can_inherit_primary_default_pool_model():
-    config = Config()
-    config.agents.defaults.models = ["openai1/gpt-5.4", "openai2/gpt-5.4"]
-    config.agents.subagent.provider = "openai_2"
-    config.providers.openai_2.api_key = "sk-route-2"
-    config.providers.openai_2.api_base = "https://route-2.example.com/v1"
-
-    provider = _make_subagent_provider(config, inherited_model=_resolve_default_agent_model(config))
-
-    assert isinstance(provider, CustomProvider)
-    assert provider.default_model == "gpt-5.4"
-    assert provider.api_base == "https://route-2.example.com/v1"
 
 
 class _StubProvider(LLMProvider):

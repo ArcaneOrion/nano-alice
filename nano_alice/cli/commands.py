@@ -495,7 +495,6 @@ def _make_provider(
         )
 
     model = model or config.agents.defaults.model
-    provider_name = provider_name or (config.agents.defaults.provider if using_default_model else None)
     return _build_single_provider(model, provider_name)
 
 
@@ -535,8 +534,8 @@ def _make_subagent_provider(config: Config, inherited_model: str | None = None):
 
     subagent_cfg = config.agents.subagent
     configured_models = [candidate for candidate in subagent_cfg.models if candidate]
-    configured_model = subagent_cfg.model.strip()
-    configured_provider = subagent_cfg.provider.strip()
+    configured_model = subagent_cfg.model.strip() if subagent_cfg.model else ""
+    configured_provider = ""  # auto-match from model
     has_explicit_subagent_config = bool(configured_provider or configured_model or configured_models)
 
     if not has_explicit_subagent_config:

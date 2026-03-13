@@ -191,7 +191,6 @@ class AgentDefaults(Base):
     """Default agent configuration."""
 
     workspace: str = "~/.nano-alice/workspace"
-    provider: str = ""  # empty = auto-match from model
     model: str = "anthropic/claude-opus-4-5"
     models: list[str] = Field(default_factory=list)  # optional fallback pool after `model` fails
     fallback_timeout_seconds: int = 30
@@ -215,7 +214,6 @@ class MemoryAgentConfig(Base):
 class SubagentConfig(Base):
     """Task subagent configuration."""
 
-    provider: str = ""  # empty = auto-match from model
     model: str = ""  # empty = use main agent provider/model
     models: list[str] = Field(default_factory=list)  # optional fallback pool after `model` fails
     fallback_timeout_seconds: int = 30
