@@ -160,7 +160,8 @@ class AgentLoop:
         self.reminder_intents = ReminderIntentStore(workspace)
         self.task_router = TaskRouter()
         self.task_renderer = TaskStateRenderer()
-        self.tools = ToolRegistry()
+        allowed_dir = self.workspace if self.restrict_to_workspace else None
+        self.tools = ToolRegistry(workspace=self.workspace, allowed_dir=allowed_dir)
         self.subagents = SubagentManager(
             provider=subagent_provider or provider,
             workspace=workspace,
