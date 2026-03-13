@@ -1680,6 +1680,10 @@ class AgentLoop:
                 spawn_info["spawn_task_id"],
                 spawn_info["result"],
             )
+        elif not auto_continue_after_subagent:
+            # 兜底：LLM 未调用 task_update 也未 spawn，自动推进步骤
+            task_state = self._complete_current_step(task_state, final_content, task_evidence)
+            completed_task = task_state is None
         task_state = self._normalize_task_state(task_state, context="post_step")
         if completed_task:
             self._reset_session_to_chat_mode(session)
