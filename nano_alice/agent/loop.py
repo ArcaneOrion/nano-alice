@@ -181,6 +181,7 @@ class AgentLoop:
         self._mcp_connecting = False
         self._consolidating: set[str] = set()  # Session keys with consolidation in progress
         self._pending_tasks: list[asyncio.Task] = []  # Background tasks (memory agent, etc.)
+        self._stop_requested: set[str] = set()  # Session keys with stop requested
 
         # Memory agent config
         self._memory_agent_enabled = memory_agent_config.enabled if memory_agent_config else True
@@ -1048,6 +1049,7 @@ class AgentLoop:
         *,
         stop_on_spawn: bool = False,
         emit_progress_text: bool = False,
+        session_key: str = "",
     ) -> tuple[str | None, list[str], dict[str, int], list[str], list[dict[str, Any]]]:
         """Run the agent iteration loop. Returns final content, tool names, usage, evidence, tool events."""
         messages = initial_messages
@@ -1065,6 +1067,11 @@ class AgentLoop:
 
         while iteration < self.max_iterations:
             iteration += 1
+
+            # Checkpoint A: stop check before LLM call
+            if session_key and self._is_stop_requested(session_key):
+                final_content = "Processing stopped by user."
+                break
 
             response = await self._chat_with_retry(messages, self.tools.get_definitions())
 
@@ -1100,6 +1107,14 @@ class AgentLoop:
                 )
 
                 for tool_call in response.tool_calls:
+                    # Checkpoint B: stop check before each tool execution
+                    if session_key and self._is_stop_requested(session_key):
+                        messages = self.context.add_tool_result(
+                            messages, tool_call.id, tool_call.name, "[Stopped by user]"
+                        )
+                        final_content = "Processing stopped by user."
+                        break
+
                     tools_used.append(tool_call.name)
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.info("Tool call: {}({})", tool_call.name, args_str[:200])
@@ -1134,6 +1149,9 @@ class AgentLoop:
                         final_content = self._strip_think(response.content)
                         break
                 if stop_after_spawn:
+                    # Also check stop flag after spawn break
+                    if session_key and self._is_stop_requested(session_key):
+                        final_content = "Processing stopped by user."
                     break
             else:
                 final_content = self._strip_think(response.content)
@@ -1163,30 +1181,53 @@ class AgentLoop:
         while self._running:
             try:
                 msg = await asyncio.wait_for(self.bus.consume_inbound(), timeout=1.0)
-                try:
-                    sk = msg.metadata.get("_session_key")
-                    response = await self._process_message(msg, session_key=sk)
-                    if response is not None:
-                        if sk == "heartbeat":
-                            _, normalized = normalize_heartbeat_response(response.content)
-                            response.content = normalized
+                sk = msg.metadata.get("_session_key")
 
-                        if (
-                            sk == "heartbeat"
-                            and (response.content or "").strip() == HEARTBEAT_OK_TOKEN
-                        ):
-                            logger.info("Heartbeat: OK (no action needed)")
-                        else:
-                            await self.bus.publish_outbound(response)
-                    elif msg.channel == "cli":
+                # Check for /stop command before processing
+                if (msg.content or "").strip().lower() == "/stop":
+                    await self.bus.publish_outbound(
+                        OutboundMessage(
+                            channel=msg.channel,
+                            chat_id=msg.chat_id,
+                            content="Nothing is currently processing.",
+                        )
+                    )
+                    continue
+
+                # Wrap processing in a task while draining /stop commands
+                process_task = asyncio.create_task(
+                    self._process_message(msg, session_key=sk)
+                )
+                buffered: list[InboundMessage] = []
+
+                while not process_task.done():
+                    try:
+                        next_msg = await asyncio.wait_for(
+                            self.bus.consume_inbound(), timeout=0.3
+                        )
+                    except asyncio.TimeoutError:
+                        continue
+
+                    if (next_msg.content or "").strip().lower() == "/stop":
+                        stop_sk = next_msg.metadata.get("_session_key") or next_msg.session_key
+                        self._request_stop(stop_sk)
                         await self.bus.publish_outbound(
                             OutboundMessage(
-                                channel=msg.channel,
-                                chat_id=msg.chat_id,
-                                content="",
-                                metadata=msg.metadata or {},
+                                channel=next_msg.channel,
+                                chat_id=next_msg.chat_id,
+                                content="Stopping current processing...",
                             )
                         )
+                    else:
+                        buffered.append(next_msg)
+
+                # Re-queue buffered messages
+                for bm in buffered:
+                    await self.bus.publish_inbound(bm)
+
+                # Get the result
+                try:
+                    response = process_task.result()
                 except Exception as e:
                     logger.error("Error processing message: {}", e)
                     await self.bus.publish_outbound(
@@ -1194,6 +1235,33 @@ class AgentLoop:
                             channel=msg.channel,
                             chat_id=msg.chat_id,
                             content=f"Sorry, I encountered an error: {str(e)}",
+                        )
+                    )
+                    continue
+
+                # Clear stop flag after processing
+                if sk:
+                    self._clear_stop(sk)
+
+                if response is not None:
+                    if sk == "heartbeat":
+                        _, normalized = normalize_heartbeat_response(response.content)
+                        response.content = normalized
+
+                    if (
+                        sk == "heartbeat"
+                        and (response.content or "").strip() == HEARTBEAT_OK_TOKEN
+                    ):
+                        logger.info("Heartbeat: OK (no action needed)")
+                    else:
+                        await self.bus.publish_outbound(response)
+                elif msg.channel == "cli":
+                    await self.bus.publish_outbound(
+                        OutboundMessage(
+                            channel=msg.channel,
+                            chat_id=msg.chat_id,
+                            content="",
+                            metadata=msg.metadata or {},
                         )
                     )
             except asyncio.TimeoutError:
@@ -1219,6 +1287,18 @@ class AgentLoop:
         """Stop the agent loop."""
         self._running = False
         logger.info("Agent loop stopping")
+
+    def _request_stop(self, session_key: str) -> None:
+        """Request stop for a specific session."""
+        self._stop_requested.add(session_key)
+
+    def _is_stop_requested(self, session_key: str) -> bool:
+        """Check if stop was requested for a session."""
+        return session_key in self._stop_requested
+
+    def _clear_stop(self, session_key: str) -> None:
+        """Clear stop request for a session."""
+        self._stop_requested.discard(session_key)
 
     async def _process_message(
         self,
@@ -1280,7 +1360,7 @@ class AgentLoop:
             )
             messages = self.context.render_messages(envelope)
             try:
-                final_content, _, token_usage, _, _ = await self._run_agent_loop(messages)
+                final_content, _, token_usage, _, _ = await self._run_agent_loop(messages, session_key=key)
             except Exception as e:
                 logger.error("Failed to process due reminder intent {}: {}", intent.intent_id, e)
                 self.reminder_intents.update_delivery(
@@ -1353,7 +1433,7 @@ class AgentLoop:
                 internal_event_text=internal_event_text,
             )
             messages = self.context.render_messages(envelope)
-            final_content, _, _, _, _ = await self._run_agent_loop(messages)
+            final_content, _, _, _, _ = await self._run_agent_loop(messages, session_key=key)
             session.add_message("user", f"[System: {msg.sender_id}] {msg.content}")
             session.add_message("assistant", final_content or "Background task completed.")
             self.sessions.save(session)
@@ -1401,6 +1481,12 @@ class AgentLoop:
                 chat_id=msg.chat_id,
                 content="New session started. Memory consolidation in progress.",
             )
+        if cmd == "/stop":
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="Nothing is currently processing.",
+            )
         if cmd == "/help":
             return OutboundMessage(
                 channel=msg.channel,
@@ -1412,6 +1498,7 @@ class AgentLoop:
                     "/task-confirm — Confirm the latest plan and start execution\n"
                     "/chat — Return to normal chat mode\n"
                     "/memory — Reconcile existing memory files\n"
+                    "/stop — Stop current processing\n"
                     "/help — Show available commands"
                 ),
             )
@@ -1628,6 +1715,7 @@ class AgentLoop:
             on_progress=effective_progress,
             stop_on_spawn=bool(task_state is not None and route.mode == "task"),
             emit_progress_text=bool(on_progress and msg.channel == "cli"),
+            session_key=key,
         )
 
         if final_content is None:
@@ -1746,6 +1834,11 @@ class AgentLoop:
             meta["task_current_step_id"] = task_state.current_step_id
         if token_usage and any(v > 0 for v in token_usage.values()):
             meta["token_usage"] = token_usage
+
+        # Inject model names for display
+        meta["model"] = self.model
+        if self.subagents.model != self.model:
+            meta["subagent_model"] = self.subagents.model
 
         continuation_scheduled = False
         if (continuation_requested or auto_continue_after_subagent) and task_state and task_state.phase == "executing":

@@ -697,8 +697,8 @@ class FeishuChannel(BaseChannel):
                 # 显示上下文大小和 token 消耗
                 context_size = msg.metadata.get("context_size") if msg.metadata else None
                 token_usage = msg.metadata.get("token_usage") if msg.metadata else None
-                
-                if context_size or token_usage:
+
+                if context_size or token_usage or (msg.metadata and msg.metadata.get("model")):
                     notes = []
                     if context_size:
                         if "system_chars" in context_size:
@@ -719,14 +719,23 @@ class FeishuChannel(BaseChannel):
                             user_len = context_size.get("user", 0)
                             if system_len > 0 or user_len > 0:
                                 notes.append(f"Context: system={system_len} chars, user={user_len} chars")
-                    
+
                     if token_usage and not msg.metadata.get("_progress"):
                         total = token_usage.get("total_tokens", 0)
                         if total > 0:
                             prompt = token_usage.get("prompt_tokens", 0)
                             compl = token_usage.get("completion_tokens", 0)
                             notes.append(f"Tokens: {prompt} + {compl} = {total}")
-                    
+
+                    # 显示模型名称
+                    model_name = msg.metadata.get("model") if msg.metadata else None
+                    if model_name and not msg.metadata.get("_progress"):
+                        model_line = f"Model: {model_name}"
+                        subagent_model = msg.metadata.get("subagent_model") if msg.metadata else None
+                        if subagent_model:
+                            model_line += f" + {subagent_model}"
+                        notes.append(model_line)
+
                     if notes:
                         elements.append({"tag": "hr"})
                         for note in notes:
