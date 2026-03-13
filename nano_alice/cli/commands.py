@@ -600,6 +600,7 @@ def _setup_logging(enable_console: bool = False, console_level: str = "INFO") ->
             level=console_level,
             format="{time:HH:mm:ss} | {level:<5} | {message}",
             filter="nano_alice",
+            colorize=True,
         )
 
 
