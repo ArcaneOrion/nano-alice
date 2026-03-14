@@ -55,13 +55,16 @@ if TYPE_CHECKING:
 _LLM_MAX_RETRIES = 3
 _LLM_RETRY_BASE_DELAY = 2  # 秒，指数退避基数
 
-# 匹配到这些关键词的错误不重试（认证/权限类，重试也没用）
+# 匹配到这些关键词的错误不重试（认证/权限/请求本身有问题，重试也没用）
 _NON_RETRYABLE_PATTERNS = (
     "401",
     "403",
     "AuthenticationError",
     "PermissionDenied",
     "invalid api key",
+    "context_length_exceeded",
+    "maximum context length",
+    "too many tokens",
     "invalid_api_key",
     "Unauthorized",
 )

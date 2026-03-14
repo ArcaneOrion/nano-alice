@@ -598,7 +598,7 @@ def _setup_logging(enable_console: bool = False, console_level: str = "INFO") ->
         logger.add(
             lambda msg: print(msg, end=""),
             level=console_level,
-            format="{time:HH:mm:ss} | {level:<5} | {message}",
+            format="<level>{time:HH:mm:ss} | {level:<5} | {message}</level>",
             filter="nano_alice",
             colorize=True,
         )

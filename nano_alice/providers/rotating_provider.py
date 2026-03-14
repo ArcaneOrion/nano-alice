@@ -10,6 +10,13 @@ from loguru import logger
 
 from nano_alice.providers.base import LLMProvider, LLMResponse, normalize_endpoint_label
 
+# 这些错误说明请求本身有问题（如上下文过长），换 provider 也没用
+_NON_FALLBACKABLE_PATTERNS = (
+    "context_length_exceeded",
+    "maximum context length",
+    "too many tokens",
+)
+
 
 class RotatingProvider(LLMProvider):
     """Use a primary provider and fail over through an ordered fallback pool."""
@@ -73,6 +80,9 @@ class RotatingProvider(LLMProvider):
                 timeout_seconds=self.primary_timeout_seconds,
             )
             if primary_response.finish_reason != "error":
+                return primary_response
+            # 请求级错误（如上下文过长），换 provider 也无法解决，直接返回
+            if self._is_non_fallbackable(primary_response):
                 return primary_response
             logger.warning(
                 "Primary endpoint failed, switching to fallback pool: primary={} request_id={} trace={} error={}",
@@ -146,6 +156,15 @@ class RotatingProvider(LLMProvider):
                     started_at,
                 )
                 return fallback_response
+            # 请求级错误，停止遍历 fallback 池
+            if self._is_non_fallbackable(fallback_response):
+                logger.warning(
+                    "Endpoint pool stopping fallback: non-fallbackable error from index={} provider={} error={}",
+                    index,
+                    self._provider_label(self.fallback_providers[index]),
+                    (fallback_response.content or "")[:200],
+                )
+                return fallback_response
             logger.warning(
                 "Endpoint pool fallback failed: index={} provider={} request_id={} trace={} error={}",
                 index,
@@ -209,6 +228,12 @@ class RotatingProvider(LLMProvider):
     def _clear_fallback_state(self) -> None:
         self._active_fallback_index = None
         self._fallback_started_at = None
+
+    @staticmethod
+    def _is_non_fallbackable(response: LLMResponse) -> bool:
+        """Check if the error is a request-level issue (switching provider won't help)."""
+        text = (response.content or "").lower()
+        return any(p in text for p in _NON_FALLBACKABLE_PATTERNS)
 
     def get_default_model(self) -> str:
         return self.primary_provider.get_default_model()
