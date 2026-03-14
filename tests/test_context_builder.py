@@ -110,3 +110,26 @@ def test_render_messages_can_encode_internal_event_without_user_input(tmp_path: 
 
     metrics = builder.compute_context_metrics(envelope, messages)
     assert metrics["user_input_chars"] == 0
+
+
+def test_add_tool_result_truncates_web_fetch_payload(tmp_path: Path) -> None:
+    import json
+
+    workspace = tmp_path
+    memory_dir = workspace / "memory"
+    memory_dir.mkdir()
+    (memory_dir / "MEMORY.md").write_text("remember this", encoding="utf-8")
+
+    builder = ContextBuilder(workspace)
+    messages: list[dict] = [{"role": "system", "content": "sys"}]
+
+    original_text = "a" * (builder.WEB_FETCH_TEXT_MAX_CHARS + 5000)
+    result = json.dumps({"url": "https://example.com", "text": original_text}, ensure_ascii=False)
+    updated = builder.add_tool_result(messages, "call-1", "web_fetch", result)
+
+    tool_message = updated[-1]
+    assert tool_message["role"] == "tool"
+    payload = json.loads(tool_message["content"])
+    assert payload["text_truncated_for_context"] is True
+    assert payload["text_full_length"] == len(original_text)
+    assert len(payload["text"]) <= builder.WEB_FETCH_TEXT_MAX_CHARS + 64

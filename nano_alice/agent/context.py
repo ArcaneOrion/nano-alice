@@ -1,5 +1,6 @@
 """Context builder for assembling agent prompts."""
 
+import json
 import base64
 import mimetypes
 import platform
@@ -35,6 +36,7 @@ class ContextBuilder:
     """
 
     BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md", "IDENTITY.md"]
+    WEB_FETCH_TEXT_MAX_CHARS = 12_000
 
     def __init__(self, workspace: Path):
         self.workspace = workspace
@@ -330,6 +332,9 @@ To recall past events, grep {workspace_path}/memory/HISTORY.md"""
         result: str | list,
     ) -> list[dict[str, Any]]:
         """Add a tool result to the message list."""
+        if tool_name == "web_fetch" and isinstance(result, str):
+            result = self._truncate_web_fetch_result(result)
+
         summary = summarize_tool_result(tool_name, result)
         logger.debug(
             "add_tool_result: tool={} tool_call_id={} result_bytes={} result_kind={} message_bytes={} preview={}",
@@ -354,6 +359,29 @@ To recall past events, grep {workspace_path}/memory/HISTORY.md"""
             "content": result,
         })
         return messages
+
+    def _truncate_web_fetch_result(self, result: str) -> str:
+        """Reduce web_fetch payload size to avoid context explosion."""
+        try:
+            payload = json.loads(result)
+        except Exception:
+            return result
+
+        if not isinstance(payload, dict):
+            return result
+
+        text = payload.get("text")
+        if not isinstance(text, str):
+            return result
+
+        max_chars = self.WEB_FETCH_TEXT_MAX_CHARS
+        if len(text) <= max_chars:
+            return result
+
+        payload["text_full_length"] = len(text)
+        payload["text_truncated_for_context"] = True
+        payload["text"] = text[:max_chars].rstrip() + "\n\n...[truncated for context]..."
+        return json.dumps(payload, ensure_ascii=False)
 
     def add_assistant_message(
         self,
