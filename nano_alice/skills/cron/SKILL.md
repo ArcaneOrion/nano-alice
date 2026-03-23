@@ -1,11 +1,12 @@
 ---
 name: cron
 description: Schedule reminders and recurring tasks.
+aliases: [scheduler]
 ---
 
-# Cron
+# Cron / Scheduler
 
-Use the `cron` tool to schedule reminders or recurring tasks.
+Use the `scheduler` tool (aliased as `cron`) to schedule reminders or recurring tasks.
 
 ## Three Modes
 
@@ -17,29 +18,35 @@ Use the `cron` tool to schedule reminders or recurring tasks.
 
 Fixed reminder:
 ```
-cron(action="add", message="Time to take a break!", every_seconds=1200)
+scheduler(action="add", message="Time to take a break!", every_seconds=1200)
 ```
 
 Dynamic task (agent executes each time):
 ```
-cron(action="add", message="Check GitHub stars and report", every_seconds=600)
+scheduler(action="add", message="Check GitHub stars and report", every_seconds=600)
 ```
 
 One-time scheduled task (compute ISO datetime from current time):
 ```
-cron(action="add", message="Remind me about the meeting", at="<ISO datetime>")
+scheduler(action="add", message="Remind me about the meeting", at="<ISO datetime>")
 ```
 
 Timezone-aware cron:
 ```
-cron(action="add", message="Morning standup", cron_expr="0 9 * * 1-5", tz="America/Vancouver")
+scheduler(action="add", message="Morning standup", cron_expr="0 9 * * 1-5", tz="Asia/Shanghai")
 ```
 
 List/remove:
 ```
-cron(action="list")
-cron(action="remove", job_id="abc123")
+scheduler(action="list")
+scheduler(action="remove", job_id="abc123")
 ```
+
+## Note on Tool Names
+
+- **New name**: `scheduler` (preferred)
+- **Old name**: `cron` (still works as alias)
+Both names refer to the same underlying service. Use `scheduler` in new code.
 
 ## Time Expressions
 
@@ -49,7 +56,7 @@ cron(action="remove", job_id="abc123")
 | every hour | every_seconds: 3600 |
 | every day at 8am | cron_expr: "0 8 * * *" |
 | weekdays at 5pm | cron_expr: "0 17 * * 1-5" |
-| 9am Vancouver time daily | cron_expr: "0 9 * * *", tz: "America/Vancouver" |
+| 9am Shanghai time daily | cron_expr: "0 9 * * *", tz: "Asia/Shanghai" |
 | at a specific time | at: ISO datetime string (compute from current time) |
 
 ## Timezone
