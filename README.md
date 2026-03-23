@@ -159,17 +159,21 @@ nano-alice agent
 ```
 nano_alice/
 ├── agent/          # 核心 Agent 逻辑
-│   ├── loop.py     #   Agent 循环（LLM ↔ 工具执行）
+│   ├── loop.py     #   Agent 循环（Chat + Reflect 双模式）
 │   ├── context.py  #   Prompt 构建
 │   ├── memory.py   #   持久化记忆
 │   ├── skills.py   #   技能加载
+│   ├── signals/    #   内部信号系统（SignalBus）
+│   ├── reflect/    #   反思处理器
 │   ├── subagent.py #   后台任务执行
-│   └── tools/      #   内置工具
+│   └── tools/      #   内置工具（scheduler 替代 cron）
 ├── skills/         # 内置技能
 ├── channels/       # 聊天平台集成
-├── bus/            # 消息路由
-├── cron/           # 定时任务
-├── heartbeat/      # 主动唤醒
+├── bus/            # 消息路由（MessageBus）
+├── scheduler/      # 定时任务（从 cron/ 重命名）
+├── todo/           # 待办事项（从 heartbeat/ 重命名）
+├── cron/           # 向后兼容适配器
+├── heartbeat/      # 向后兼容适配器
 ├── providers/      # LLM 提供商
 ├── session/        # 会话管理
 ├── config/         # 配置
