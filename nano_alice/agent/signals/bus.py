@@ -62,9 +62,14 @@ class SignalBus:
 
         logger.info("SignalBus: publishing {}", signal.type.value)
 
-        # Run all handlers in parallel, don't wait for them
+        # Run all handlers in parallel and wait for completion
         tasks = [handler(signal) for handler in handlers]
-        await asyncio.gather(*tasks, return_exceptions=True)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Log any exceptions from handlers
+        for result in results:
+            if isinstance(result, Exception):
+                logger.error("SignalBus: handler failed for {}: {}", signal.type.value, result)
 
     async def start(self) -> None:
         """Start the signal bus."""
