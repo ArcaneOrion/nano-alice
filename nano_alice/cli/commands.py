@@ -2,23 +2,22 @@
 
 import asyncio
 import os
-import signal
-from pathlib import Path
 import select
+import signal
 import sys
+from pathlib import Path
 
 import typer
+from prompt_toolkit import PromptSession
+from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit.history import FileHistory
+from prompt_toolkit.patch_stdout import patch_stdout
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.table import Table
 from rich.text import Text
 
-from prompt_toolkit import PromptSession
-from prompt_toolkit.formatted_text import HTML
-from prompt_toolkit.history import FileHistory
-from prompt_toolkit.patch_stdout import patch_stdout
-
-from nano_alice import __version__, __logo__
+from nano_alice import __logo__, __version__
 from nano_alice.config.schema import Config
 
 app = typer.Typer(
@@ -159,9 +158,9 @@ def onboard():
     from nano_alice.config.loader import get_config_path, load_config, save_config
     from nano_alice.config.schema import Config
     from nano_alice.utils.helpers import get_workspace_path
-    
+
     config_path = get_config_path()
-    
+
     if config_path.exists():
         console.print(f"[yellow]Config already exists at {config_path}[/yellow]")
         console.print("  [bold]y[/bold] = overwrite with defaults (existing values will be lost)")
@@ -177,17 +176,17 @@ def onboard():
     else:
         save_config(Config())
         console.print(f"[green]✓[/green] Created config at {config_path}")
-    
+
     # Create workspace
     workspace = get_workspace_path()
-    
+
     if not workspace.exists():
         workspace.mkdir(parents=True, exist_ok=True)
         console.print(f"[green]✓[/green] Created workspace at {workspace}")
-    
+
     # Create default bootstrap files
     _create_workspace_templates(workspace)
-    
+
     console.print(f"\n{__logo__} nano-alice is ready!")
     console.print("\nNext steps:")
     console.print("  1. Add your API key to [cyan]~/.nano-alice/config.json[/cyan]")
@@ -254,13 +253,13 @@ Add tasks above. The agent will process them during periodic checks.
 Use `- [ ]` for pending tasks and `- [x]` for completed tasks.
 """,
     }
-    
+
     for filename, content in templates.items():
         file_path = workspace / filename
         if not file_path.exists():
             file_path.write_text(content, encoding="utf-8")
             console.print(f"  [dim]Created {filename}[/dim]")
-    
+
     # Create memory directory and MEMORY.md
     memory_dir = workspace / "memory"
     memory_dir.mkdir(exist_ok=True)
@@ -283,7 +282,7 @@ This file stores important information that should persist across sessions.
 (Things to remember)
 """, encoding="utf-8")
         console.print("  [dim]Created memory/MEMORY.md[/dim]")
-    
+
     history_file = memory_dir / "HISTORY.md"
     if not history_file.exists():
         history_file.write_text("", encoding="utf-8")
@@ -296,9 +295,9 @@ This file stores important information that should persist across sessions.
 
 def _make_provider(config: Config):
     """Create the appropriate LLM provider from config."""
+    from nano_alice.providers.custom_provider import CustomProvider
     from nano_alice.providers.litellm_provider import LiteLLMProvider
     from nano_alice.providers.openai_codex_provider import OpenAICodexProvider
-    from nano_alice.providers.custom_provider import CustomProvider
 
     model = config.agents.defaults.model
     provider_name = config.get_provider_name(model)
@@ -372,7 +371,7 @@ def gateway(
         from nano_alice.cron.types import CronJob
         from nano_alice.heartbeat.service import HeartbeatService
         SIGNAL_MODE_AVAILABLE = False
-    
+
     if verbose:
         import logging
         logging.basicConfig(level=logging.DEBUG)
@@ -489,7 +488,7 @@ def gateway(
         # Track services
         todo = None
         signal_bus = None
-    
+
     # Create channel manager
     channels = ChannelManager(config, bus)
 
@@ -503,9 +502,9 @@ def gateway(
         console.print(f"[green]✓[/green] Scheduler: {scheduler_status['jobs']} scheduled jobs")
 
     if SIGNAL_MODE_AVAILABLE:
-        console.print(f"[green]✓[/green] TODO: every 30m (signal mode)")
+        console.print("[green]✓[/green] TODO: every 30m (signal mode)")
     else:
-        console.print(f"[green]✓[/green] Heartbeat: every 30m (legacy mode)")
+        console.print("[green]✓[/green] Heartbeat: every 30m (legacy mode)")
 
     async def run():
         try:
@@ -586,7 +585,7 @@ def agent(
         restrict_to_workspace=config.tools.restrict_to_workspace,
         mcp_servers=config.tools.mcp_servers,
     )
-    
+
     # Show spinner when logs are off (no output to miss); skip when logs are on
     def _thinking_ctx():
         if logs:
@@ -750,7 +749,7 @@ def channels_status():
         "✓" if mc.enabled else "✗",
         mc_base
     )
-    
+
     # Telegram
     tg = config.channels.telegram
     tg_config = f"token: {tg.token[:10]}..." if tg.token else "[dim]not configured[/dim]"
@@ -803,57 +802,57 @@ def _get_bridge_dir() -> Path:
     """Get the bridge directory, setting it up if needed."""
     import shutil
     import subprocess
-    
+
     # User's bridge location
     user_bridge = Path.home() / ".nano-alice" / "bridge"
-    
+
     # Check if already built
     if (user_bridge / "dist" / "index.js").exists():
         return user_bridge
-    
+
     # Check for npm
     if not shutil.which("npm"):
         console.print("[red]npm not found. Please install Node.js >= 18.[/red]")
         raise typer.Exit(1)
-    
+
     # Find source bridge: first check package data, then source dir
     pkg_bridge = Path(__file__).parent.parent / "bridge"  # nano_alice/bridge (installed)
     src_bridge = Path(__file__).parent.parent.parent / "bridge"  # repo root/bridge (dev)
-    
+
     source = None
     if (pkg_bridge / "package.json").exists():
         source = pkg_bridge
     elif (src_bridge / "package.json").exists():
         source = src_bridge
-    
+
     if not source:
         console.print("[red]Bridge source not found.[/red]")
         console.print("Try reinstalling: pip install --force-reinstall nano-alice")
         raise typer.Exit(1)
-    
+
     console.print(f"{__logo__} Setting up bridge...")
-    
+
     # Copy to user directory
     user_bridge.parent.mkdir(parents=True, exist_ok=True)
     if user_bridge.exists():
         shutil.rmtree(user_bridge)
     shutil.copytree(source, user_bridge, ignore=shutil.ignore_patterns("node_modules", "dist"))
-    
+
     # Install and build
     try:
         console.print("  Installing dependencies...")
         subprocess.run(["npm", "install"], cwd=user_bridge, check=True, capture_output=True)
-        
+
         console.print("  Building...")
         subprocess.run(["npm", "run", "build"], cwd=user_bridge, check=True, capture_output=True)
-        
+
         console.print("[green]✓[/green] Bridge ready\n")
     except subprocess.CalledProcessError as e:
         console.print(f"[red]Build failed: {e}[/red]")
         if e.stderr:
             console.print(f"[dim]{e.stderr.decode()[:500]}[/dim]")
         raise typer.Exit(1)
-    
+
     return user_bridge
 
 
@@ -861,18 +860,19 @@ def _get_bridge_dir() -> Path:
 def channels_login():
     """Link device via QR code."""
     import subprocess
+
     from nano_alice.config.loader import load_config
-    
+
     config = load_config()
     bridge_dir = _get_bridge_dir()
-    
+
     console.print(f"{__logo__} Starting bridge...")
     console.print("Scan the QR code to connect.\n")
-    
+
     env = {**os.environ}
     if config.channels.whatsapp.bridge_token:
         env["BRIDGE_TOKEN"] = config.channels.whatsapp.bridge_token
-    
+
     try:
         subprocess.run(["npm", "start"], cwd=bridge_dir, check=True, env=env)
     except subprocess.CalledProcessError as e:
@@ -896,23 +896,23 @@ def cron_list(
     """List scheduled jobs."""
     from nano_alice.config.loader import get_data_dir
     from nano_alice.cron.service import CronService
-    
+
     store_path = get_data_dir() / "cron" / "jobs.json"
     service = CronService(store_path)
-    
+
     jobs = service.list_jobs(include_disabled=all)
-    
+
     if not jobs:
         console.print("No scheduled jobs.")
         return
-    
+
     table = Table(title="Scheduled Jobs")
     table.add_column("ID", style="cyan")
     table.add_column("Name")
     table.add_column("Schedule")
     table.add_column("Status")
     table.add_column("Next Run")
-    
+
     import time
     from datetime import datetime as _dt
     from zoneinfo import ZoneInfo
@@ -924,7 +924,7 @@ def cron_list(
             sched = f"{job.schedule.expr or ''} ({job.schedule.tz})" if job.schedule.tz else (job.schedule.expr or "")
         else:
             sched = "one-time"
-        
+
         # Format next run
         next_run = ""
         if job.state.next_run_at_ms:
@@ -934,11 +934,11 @@ def cron_list(
                 next_run = _dt.fromtimestamp(ts, tz).strftime("%Y-%m-%d %H:%M")
             except Exception:
                 next_run = time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
-        
+
         status = "[green]enabled[/green]" if job.enabled else "[dim]disabled[/dim]"
-        
+
         table.add_row(job.id, job.name, sched, status, next_run)
-    
+
     console.print(table)
 
 
@@ -958,7 +958,7 @@ def cron_add(
     from nano_alice.config.loader import get_data_dir
     from nano_alice.cron.service import CronService
     from nano_alice.cron.types import CronSchedule
-    
+
     if tz and not cron_expr:
         console.print("[red]Error: --tz can only be used with --cron[/red]")
         raise typer.Exit(1)
@@ -975,10 +975,10 @@ def cron_add(
     else:
         console.print("[red]Error: Must specify --every, --cron, or --at[/red]")
         raise typer.Exit(1)
-    
+
     store_path = get_data_dir() / "cron" / "jobs.json"
     service = CronService(store_path)
-    
+
     try:
         job = service.add_job(
             name=name,
@@ -1002,10 +1002,10 @@ def cron_remove(
     """Remove a scheduled job."""
     from nano_alice.config.loader import get_data_dir
     from nano_alice.cron.service import CronService
-    
+
     store_path = get_data_dir() / "cron" / "jobs.json"
     service = CronService(store_path)
-    
+
     if service.remove_job(job_id):
         console.print(f"[green]✓[/green] Removed job {job_id}")
     else:
@@ -1020,10 +1020,10 @@ def cron_enable(
     """Enable or disable a job."""
     from nano_alice.config.loader import get_data_dir
     from nano_alice.cron.service import CronService
-    
+
     store_path = get_data_dir() / "cron" / "jobs.json"
     service = CronService(store_path)
-    
+
     job = service.enable_job(job_id, enabled=not disable)
     if job:
         status = "disabled" if disable else "enabled"
@@ -1103,7 +1103,7 @@ def cron_run(
 @app.command()
 def status():
     """Show nano-alice status."""
-    from nano_alice.config.loader import load_config, get_config_path
+    from nano_alice.config.loader import get_config_path, load_config
 
     config_path = get_config_path()
     config = load_config()
@@ -1118,7 +1118,7 @@ def status():
         from nano_alice.providers.registry import PROVIDERS
 
         console.print(f"Model: {config.agents.defaults.model}")
-        
+
         # Check API keys from registry
         for spec in PROVIDERS:
             p = getattr(config.providers, spec.name, None)
