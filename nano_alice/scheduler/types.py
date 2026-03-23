@@ -24,7 +24,7 @@ class Schedule:
 @dataclass
 class JobPayload:
     """What to do when the job runs."""
-    kind: Literal["system_event", "agent_turn"] = "agent_turn"
+    kind: Literal["system_event", "agent_turn"] = "system_event"
     message: str = ""
     # Deliver response to channel
     deliver: bool = False

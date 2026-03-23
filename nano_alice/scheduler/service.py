@@ -10,13 +10,12 @@ import time
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any
 
 from loguru import logger
 
-from nano_alice.scheduler.types import Schedule, ScheduledJob, SchedulerStore, JobPayload, JobState
 from nano_alice.agent.signals.bus import SignalBus
 from nano_alice.agent.signals.types import Signal
+from nano_alice.scheduler.types import JobPayload, JobState, Schedule, ScheduledJob, SchedulerStore
 
 
 def _now_ms() -> int:
@@ -35,8 +34,9 @@ def _compute_next_run(schedule: Schedule, now_ms: int) -> int | None:
 
     if schedule.kind == "cron" and schedule.expr:
         try:
-            from croniter import croniter
             from zoneinfo import ZoneInfo
+
+            from croniter import croniter
             base_time = now_ms / 1000
             tz = ZoneInfo(schedule.tz) if schedule.tz else datetime.now().astimezone().tzinfo
             base_dt = datetime.fromtimestamp(base_time, tz=tz)
@@ -101,7 +101,7 @@ class SchedulerService:
                             tz=j["schedule"].get("tz"),
                         ),
                         payload=JobPayload(
-                            kind=j["payload"].get("kind", "agent_turn"),
+                            kind=j["payload"].get("kind", "system_event"),
                             message=j["payload"].get("message", ""),
                             deliver=j["payload"].get("deliver", False),
                             channel=j["payload"].get("channel"),
@@ -295,6 +295,7 @@ class SchedulerService:
         channel: str | None = None,
         to: str | None = None,
         delete_after_run: bool = False,
+        payload_kind: str = "system_event",
     ) -> ScheduledJob:
         """Add a new job."""
         store = self._load_store()
@@ -307,7 +308,7 @@ class SchedulerService:
             enabled=True,
             schedule=schedule,
             payload=JobPayload(
-                kind="agent_turn",
+                kind=payload_kind,
                 message=message,
                 deliver=deliver,
                 channel=channel,
