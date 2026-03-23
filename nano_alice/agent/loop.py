@@ -14,7 +14,6 @@ from loguru import logger
 from nano_alice.agent.context import ContextBuilder
 from nano_alice.agent.memory import MemoryStore
 from nano_alice.agent.subagent import SubagentManager
-from nano_alice.agent.tools.cron import CronTool
 from nano_alice.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from nano_alice.agent.tools.message import MessageTool
 from nano_alice.agent.tools.registry import ToolRegistry
@@ -26,9 +25,17 @@ from nano_alice.bus.queue import MessageBus
 from nano_alice.providers.base import LLMProvider
 from nano_alice.session.manager import Session, SessionManager
 
+# Signal mode: new architecture for internal event handling
+try:
+    from nano_alice.agent.signals.bus import SignalBus
+    from nano_alice.agent.reflect.processor import ReflectProcessor
+    SIGNALS_AVAILABLE = True
+except ImportError:
+    SIGNALS_AVAILABLE = False
+
 if TYPE_CHECKING:
     from nano_alice.config.schema import ExecToolConfig
-    from nano_alice.cron.service import CronService
+    from nano_alice.scheduler.service import SchedulerService
 
 
 class AgentLoop:
@@ -36,11 +43,16 @@ class AgentLoop:
     The agent loop is the core processing engine.
 
     It:
-    1. Receives messages from the bus
-    2. Builds context with history, memory, skills
-    3. Calls the LLM
-    4. Executes tool calls
-    5. Sends responses back
+    1. Receives messages from the bus (Chat Mode)
+    2. Receives signals from signal bus (Reflect Mode)
+    3. Builds context with history, memory, skills
+    4. Calls the LLM
+    5. Executes tool calls
+    6. Sends responses back
+
+    Signal mode refactor:
+    - Chat Mode: User messages → conversation history → response
+    - Reflect Mode: Internal signals → no session pollution → optional delivery
     """
 
     def __init__(
@@ -55,10 +67,11 @@ class AgentLoop:
         memory_window: int = 50,
         brave_api_key: str | None = None,
         exec_config: ExecToolConfig | None = None,
-        cron_service: CronService | None = None,
+        scheduler_service: SchedulerService | None = None,  # renamed from cron_service
         restrict_to_workspace: bool = False,
         session_manager: SessionManager | None = None,
         mcp_servers: dict | None = None,
+        signal_bus: SignalBus | None = None,  # NEW: signal mode support
     ):
         from nano_alice.config.schema import ExecToolConfig
         self.bus = bus
@@ -71,8 +84,15 @@ class AgentLoop:
         self.memory_window = memory_window
         self.brave_api_key = brave_api_key
         self.exec_config = exec_config or ExecToolConfig()
-        self.cron_service = cron_service
+        self.scheduler_service = scheduler_service  # renamed
         self.restrict_to_workspace = restrict_to_workspace
+
+        # Signal mode: new architecture components
+        self.signal_bus = signal_bus
+        self.reflect_processor = None
+        if SIGNALS_AVAILABLE and signal_bus:
+            from nano_alice.agent.reflect.processor import ReflectProcessor
+            self.reflect_processor = ReflectProcessor(self, bus, workspace)
 
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
@@ -111,8 +131,16 @@ class AgentLoop:
         self.tools.register(WebFetchTool())
         self.tools.register(MessageTool(send_callback=self.bus.publish_outbound))
         self.tools.register(SpawnTool(manager=self.subagents))
-        if self.cron_service:
-            self.tools.register(CronTool(self.cron_service))
+
+        # Scheduler tool (renamed from cron)
+        if self.scheduler_service:
+            # Try to import new scheduler tool, fall back to old cron tool
+            try:
+                from nano_alice.agent.tools.scheduler import SchedulerTool
+                self.tools.register(SchedulerTool(self.scheduler_service))
+            except ImportError:
+                from nano_alice.agent.tools.cron import CronTool
+                self.tools.register(CronTool(self.scheduler_service))
 
     async def _connect_mcp(self) -> None:
         """Connect to configured MCP servers (one-time, lazy)."""
@@ -146,9 +174,16 @@ class AgentLoop:
             if isinstance(spawn_tool, SpawnTool):
                 spawn_tool.set_context(channel, chat_id)
 
-        if cron_tool := self.tools.get("cron"):
-            if isinstance(cron_tool, CronTool):
-                cron_tool.set_context(channel, chat_id)
+        # Support both old cron and new scheduler tools
+        if scheduler_tool := self.tools.get("scheduler") or self.tools.get("cron"):
+            # Update internal state for signal mode
+            if self.reflect_processor:
+                self.reflect_processor.state.set_active_session(
+                    channel, chat_id, f"{channel}:{chat_id}"
+                )
+            # Also update the tool if it has set_context
+            if hasattr(scheduler_tool, "set_context"):
+                scheduler_tool.set_context(channel, chat_id)
 
     @staticmethod
     def _strip_think(text: str | None) -> str | None:
@@ -227,11 +262,33 @@ class AgentLoop:
         return final_content, tools_used
 
     async def run(self) -> None:
-        """Run the agent loop, processing messages from the bus."""
+        """
+        Run the agent loop, processing messages from the bus.
+
+        Signal mode refactor: now runs both Chat Mode (messages) and
+        Reflect Mode (signals) concurrently.
+        """
         self._running = True
         await self._connect_mcp()
         logger.info("Agent loop started")
 
+        # Start signal bus if available
+        if self.signal_bus:
+            await self.signal_bus.start()
+
+        # Run both loops in parallel
+        tasks = [self._chat_loop()]
+        if self.reflect_processor and self.signal_bus:
+            tasks.append(self._reflect_loop())
+
+        try:
+            await asyncio.gather(*tasks)
+        finally:
+            if self.signal_bus:
+                self.signal_bus.stop()
+
+    async def _chat_loop(self) -> None:
+        """Process inbound messages from channels (Chat Mode)."""
         while self._running:
             try:
                 msg = await asyncio.wait_for(
@@ -255,6 +312,22 @@ class AgentLoop:
                     ))
             except asyncio.TimeoutError:
                 continue
+
+    async def _reflect_loop(self) -> None:
+        """
+        Process internal signals (Reflect Mode).
+
+        This loop is separate from chat processing to prevent internal
+        maintenance from polluting conversation history.
+        """
+        if not self.reflect_processor:
+            return
+
+        # Signals are handled via SignalBus.subscribe, not a queue
+        # This is a placeholder for any direct signal processing needed
+        while self._running:
+            await asyncio.sleep(1)
+            # Signals are dispatched by ReflectProcessor via SignalBus subscriptions
 
     async def close_mcp(self) -> None:
         """Close MCP connections."""
