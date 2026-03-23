@@ -238,6 +238,21 @@ Information about the user goes here.
 - Timezone: (your timezone)
 - Language: (your preferred language)
 """,
+        "TODO.md": """# TODO Tasks
+
+This file is checked every 30 minutes for pending tasks.
+
+## Examples
+
+- [ ] Check calendar and remind of upcoming events
+- [ ] Scan inbox for urgent emails
+- [ ] Check weather forecast for today
+
+## Instructions
+
+Add tasks above. The agent will process them during periodic checks.
+Use `- [ ]` for pending tasks and `- [x]` for completed tasks.
+""",
     }
     
     for filename, content in templates.items():
@@ -553,7 +568,7 @@ def agent(
         memory_window=config.agents.defaults.memory_window,
         brave_api_key=config.tools.web.search.api_key or None,
         exec_config=config.tools.exec,
-        cron_service=cron,
+        scheduler_service=cron,  # renamed from cron_service
         restrict_to_workspace=config.tools.restrict_to_workspace,
         mcp_servers=config.tools.mcp_servers,
     )
