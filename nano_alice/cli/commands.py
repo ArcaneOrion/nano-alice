@@ -333,92 +333,161 @@ def gateway(
     from nano_alice.agent.loop import AgentLoop
     from nano_alice.channels.manager import ChannelManager
     from nano_alice.session.manager import SessionManager
-    from nano_alice.cron.service import CronService
-    from nano_alice.cron.types import CronJob
-    from nano_alice.heartbeat.service import HeartbeatService
+
+    # Signal mode: new architecture components
+    try:
+        from nano_alice.agent.signals.bus import SignalBus
+        from nano_alice.agent.reflect.processor import ReflectProcessor
+        from nano_alice.agent.signals.types import AgentSignal  # Added
+        from nano_alice.scheduler.service import SchedulerService
+        from nano_alice.todo.service import TODOService
+        SIGNAL_MODE_AVAILABLE = True
+    except ImportError:
+        # Fallback to old cron/heartbeat for transition
+        from nano_alice.cron.service import CronService
+        from nano_alice.cron.types import CronJob
+        from nano_alice.heartbeat.service import HeartbeatService
+        SIGNAL_MODE_AVAILABLE = False
     
     if verbose:
         import logging
         logging.basicConfig(level=logging.DEBUG)
-    
+
     console.print(f"{__logo__} Starting nano-alice gateway on port {port}...")
-    
+
     config = load_config()
     bus = MessageBus()
     provider = _make_provider(config)
     session_manager = SessionManager(config.workspace_path)
-    
-    # Create cron service first (callback set after agent creation)
-    cron_store_path = get_data_dir() / "cron" / "jobs.json"
-    cron = CronService(cron_store_path)
-    
-    # Create agent with cron service
-    agent = AgentLoop(
-        bus=bus,
-        provider=provider,
-        workspace=config.workspace_path,
-        model=config.agents.defaults.model,
-        temperature=config.agents.defaults.temperature,
-        max_tokens=config.agents.defaults.max_tokens,
-        max_iterations=config.agents.defaults.max_tool_iterations,
-        memory_window=config.agents.defaults.memory_window,
-        brave_api_key=config.tools.web.search.api_key or None,
-        exec_config=config.tools.exec,
-        cron_service=cron,
-        restrict_to_workspace=config.tools.restrict_to_workspace,
-        session_manager=session_manager,
-        mcp_servers=config.tools.mcp_servers,
-    )
-    
-    # Set cron callback (needs agent)
-    async def on_cron_job(job: CronJob) -> str | None:
-        """Execute a cron job through the agent."""
-        response = await agent.process_direct(
-            job.payload.message,
-            session_key=f"cron:{job.id}",
-            channel=job.payload.channel or "cli",
-            chat_id=job.payload.to or "direct",
+
+    # Import AgentSignal for new mode
+    if SIGNAL_MODE_AVAILABLE:
+        from nano_alice.agent.signals.types import AgentSignal
+
+    # Signal mode: use new architecture if available
+    if SIGNAL_MODE_AVAILABLE:
+        # New architecture: SignalBus + ReflectProcessor + Scheduler + TODO
+        signal_bus = SignalBus()
+        scheduler_store_path = get_data_dir() / "cron" / "jobs.json"  # Keep path for migration
+        scheduler = SchedulerService(scheduler_store_path, signal_bus=signal_bus)
+
+        # Create agent with signal_bus
+        agent = AgentLoop(
+            bus=bus,
+            provider=provider,
+            workspace=config.workspace_path,
+            model=config.agents.defaults.model,
+            temperature=config.agents.defaults.temperature,
+            max_tokens=config.agents.defaults.max_tokens,
+            max_iterations=config.agents.defaults.max_tool_iterations,
+            memory_window=config.agents.defaults.memory_window,
+            brave_api_key=config.tools.web.search.api_key or None,
+            exec_config=config.tools.exec,
+            scheduler_service=scheduler,
+            restrict_to_workspace=config.tools.restrict_to_workspace,
+            session_manager=session_manager,
+            mcp_servers=config.tools.mcp_servers,
+            signal_bus=signal_bus,
         )
-        if job.payload.deliver and job.payload.to:
-            from nano_alice.bus.events import OutboundMessage
-            await bus.publish_outbound(OutboundMessage(
+
+        # Subscribe reflect processor to signal bus
+        if agent.reflect_processor:
+            signal_bus.subscribe(AgentSignal.SCHEDULE_TRIGGER, agent.reflect_processor.process)
+            signal_bus.subscribe(AgentSignal.TODO_CHECK, agent.reflect_processor.process)
+
+        # Create TODO service
+        todo = TODOService(
+            workspace=config.workspace_path,
+            signal_bus=signal_bus,
+            interval_s=30 * 60,
+            enabled=True
+        )
+
+        # Track which services we have for display/cleanup
+        heartbeat = None  # Not used in new mode
+        cron = scheduler  # Alias for display
+    else:
+        # Old architecture: callbacks
+        cron_store_path = get_data_dir() / "cron" / "jobs.json"
+        cron = CronService(cron_store_path)
+
+        # Create agent with cron service
+        agent = AgentLoop(
+            bus=bus,
+            provider=provider,
+            workspace=config.workspace_path,
+            model=config.agents.defaults.model,
+            temperature=config.agents.defaults.temperature,
+            max_tokens=config.agents.defaults.max_tokens,
+            max_iterations=config.agents.defaults.max_tool_iterations,
+            memory_window=config.agents.defaults.memory_window,
+            brave_api_key=config.tools.web.search.api_key or None,
+            exec_config=config.tools.exec,
+            scheduler_service=cron,  # renamed param
+            restrict_to_workspace=config.tools.restrict_to_workspace,
+            session_manager=session_manager,
+            mcp_servers=config.tools.mcp_servers,
+        )
+
+        # Set cron callback (needs agent)
+        async def on_cron_job(job: CronJob) -> str | None:
+            """Execute a cron job through the agent."""
+            response = await agent.process_direct(
+                job.payload.message,
+                session_key=f"cron:{job.id}",
                 channel=job.payload.channel or "cli",
-                chat_id=job.payload.to,
-                content=response or ""
-            ))
-        return response
-    cron.on_job = on_cron_job
-    
-    # Create heartbeat service
-    async def on_heartbeat(prompt: str) -> str:
-        """Execute heartbeat through the agent."""
-        return await agent.process_direct(prompt, session_key="heartbeat")
-    
-    heartbeat = HeartbeatService(
-        workspace=config.workspace_path,
-        on_heartbeat=on_heartbeat,
-        interval_s=30 * 60,  # 30 minutes
-        enabled=True
-    )
+                chat_id=job.payload.to or "direct",
+            )
+            if job.payload.deliver and job.payload.to:
+                from nano_alice.bus.events import OutboundMessage
+                await bus.publish_outbound(OutboundMessage(
+                    channel=job.payload.channel or "cli",
+                    chat_id=job.payload.to,
+                    content=response or ""
+                ))
+            return response
+        cron.on_job = on_cron_job
+
+        # Create heartbeat service
+        async def on_heartbeat(prompt: str) -> str:
+            """Execute heartbeat through the agent."""
+            return await agent.process_direct(prompt, session_key="heartbeat")
+
+        heartbeat = HeartbeatService(
+            workspace=config.workspace_path,
+            on_heartbeat=on_heartbeat,
+            interval_s=30 * 60,
+            enabled=True
+        )
+
+        # Track services
+        todo = None
+        signal_bus = None
     
     # Create channel manager
     channels = ChannelManager(config, bus)
-    
+
     if channels.enabled_channels:
         console.print(f"[green]✓[/green] Channels enabled: {', '.join(channels.enabled_channels)}")
     else:
         console.print("[yellow]Warning: No channels enabled[/yellow]")
-    
-    cron_status = cron.status()
-    if cron_status["jobs"] > 0:
-        console.print(f"[green]✓[/green] Cron: {cron_status['jobs']} scheduled jobs")
-    
-    console.print(f"[green]✓[/green] Heartbeat: every 30m")
-    
+
+    scheduler_status = scheduler.status()
+    if scheduler_status["jobs"] > 0:
+        console.print(f"[green]✓[/green] Scheduler: {scheduler_status['jobs']} scheduled jobs")
+
+    if SIGNAL_MODE_AVAILABLE:
+        console.print(f"[green]✓[/green] TODO: every 30m (signal mode)")
+    else:
+        console.print(f"[green]✓[/green] Heartbeat: every 30m (legacy mode)")
+
     async def run():
         try:
-            await cron.start()
-            await heartbeat.start()
+            await scheduler.start()
+            if todo:
+                await todo.start()
+            elif heartbeat:
+                await heartbeat.start()
             await asyncio.gather(
                 agent.run(),
                 channels.start_all(),
@@ -427,11 +496,14 @@ def gateway(
             console.print("\nShutting down...")
         finally:
             await agent.close_mcp()
-            heartbeat.stop()
-            cron.stop()
+            if todo:
+                todo.stop()
+            if heartbeat:
+                heartbeat.stop()
+            scheduler.stop()
             agent.stop()
             await channels.stop_all()
-    
+
     asyncio.run(run())
 
 
