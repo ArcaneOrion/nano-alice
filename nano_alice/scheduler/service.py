@@ -246,8 +246,17 @@ class SchedulerService:
 
         # Emit signal instead of calling callback
         if self.signal_bus:
-            signal = Signal.schedule_trigger(job)
-            await self.signal_bus.publish(signal)
+            try:
+                signal = Signal.schedule_trigger(job)
+                await self.signal_bus.publish(signal)
+                # SignalBus.publish now waits for handlers to complete
+                job.state.last_status = "ok"
+                job.state.last_error = None
+                logger.info("Scheduler: job '{}' completed", job.name)
+            except Exception as e:
+                job.state.last_status = "error"
+                job.state.last_error = str(e)
+                logger.error("Scheduler: job '{}' failed: {}", job.name, e)
         else:
             logger.warning("Scheduler: no signal_bus, job '{}' not executed", job.name)
             job.state.last_status = "error"
@@ -255,10 +264,6 @@ class SchedulerService:
             job.state.last_run_at_ms = start_ms
             job.updated_at_ms = _now_ms()
             return
-
-        job.state.last_status = "ok"
-        job.state.last_error = None
-        logger.info("Scheduler: job '{}' completed", job.name)
 
         job.state.last_run_at_ms = start_ms
         job.updated_at_ms = _now_ms()
