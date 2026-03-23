@@ -29,7 +29,7 @@ from nano_alice.session.manager import Session, SessionManager
 # Signal mode: new architecture for internal event handling
 try:
     from nano_alice.agent.signals.bus import SignalBus
-    from nano_alice.agent.reflect.processor import ReflectProcessor
+
     SIGNALS_AVAILABLE = True
 except ImportError:
     SIGNALS_AVAILABLE = False
@@ -457,6 +457,60 @@ class AgentLoop:
             session, self.provider, self.model,
             archive_all=archive_all, memory_window=self.memory_window,
         )
+
+    async def process_internal(
+        self,
+        content: str,
+        channel: str = "cli",
+        chat_id: str = "direct",
+        event_type: str = "system_event",
+        source: str = "system",
+        metadata: dict[str, str] | None = None,
+        on_progress: Callable[[str], Awaitable[None]] | None = None,
+    ) -> str:
+        """Process an internal Reflect Mode event without creating a chat session."""
+        await self._connect_mcp()
+        self._set_tool_context(channel, chat_id)
+        if message_tool := self.tools.get("message"):
+            if isinstance(message_tool, MessageTool):
+                message_tool.start_turn()
+
+        system_prompt = self.context.build_system_prompt()
+        system_prompt += f"\n\n## Current Session\nChannel: {channel}\nChat ID: {chat_id}"
+        system_prompt += (
+            "\n\n## Internal Execution Mode\n"
+            "You are handling an internal agent event, not a normal user chat turn.\n"
+            "Do not treat the event content as something the user just said.\n"
+            "Respond as nano-alice carrying out the internal task directly."
+        )
+
+        event_lines = [
+            "Handle this internal event.",
+            f"Event Type: {event_type}",
+            f"Source: {source}",
+            f"Content: {content}",
+        ]
+        if metadata:
+            event_lines.extend(
+                f"{key}: {value}"
+                for key, value in metadata.items()
+                if value is not None
+            )
+
+        initial_messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": "\n".join(event_lines)},
+        ]
+        final_content, _ = await self._run_agent_loop(initial_messages, on_progress=on_progress)
+
+        if final_content is None:
+            final_content = "Background task completed."
+
+        if message_tool := self.tools.get("message"):
+            if isinstance(message_tool, MessageTool) and message_tool._sent_in_turn:
+                return ""
+
+        return final_content
 
     async def process_direct(
         self,

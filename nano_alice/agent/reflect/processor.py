@@ -5,19 +5,17 @@ This processes signals in Reflect Mode without polluting conversation history.
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from loguru import logger
 
-from nano_alice.agent.signals.types import AgentSignal, Signal
 from nano_alice.agent.reflect.internal_state import InternalState
+from nano_alice.agent.signals.types import AgentSignal, Signal
 
 if TYPE_CHECKING:
-    from nano_alice.bus.queue import MessageBus
-    from nano_alice.bus.events import OutboundMessage
     from nano_alice.agent.loop import AgentLoop
+    from nano_alice.bus.queue import MessageBus
 
 
 class ReflectProcessor:
@@ -76,6 +74,7 @@ class ReflectProcessor:
         job_id = signal.data.get("job_id", "unknown")
         message = signal.data.get("message", "")
         deliver = signal.data.get("deliver", False)
+        payload_kind = signal.data.get("payload_kind", "system_event")
 
         logger.info("ReflectProcessor: executing schedule job {}", job_id)
 
@@ -91,13 +90,25 @@ class ReflectProcessor:
             channel = "cli"
             to = "direct"
 
-        # Execute the task (uses process_direct, no session pollution)
-        response = await self.agent.process_direct(
-            message,
-            session_key=f"schedule:{job_id}",  # Isolated session for scheduler
-            channel=channel,
-            chat_id=to or "direct",
-        )
+        if payload_kind == "agent_turn":
+            response = await self.agent.process_direct(
+                message,
+                session_key=f"schedule:{job_id}",
+                channel=channel,
+                chat_id=to or "direct",
+            )
+        else:
+            response = await self.agent.process_internal(
+                message,
+                channel=channel,
+                chat_id=to or "direct",
+                event_type="system_event",
+                source="scheduler",
+                metadata={
+                    "Job ID": job_id,
+                    "Job Name": signal.data.get("job_name", "unknown"),
+                },
+            )
 
         # Deliver if requested
         if deliver and response:
@@ -128,9 +139,11 @@ class ReflectProcessor:
         # TODO has content - process it
         logger.info("ReflectProcessor: TODO has tasks, processing...")
 
-        response = await self.agent.process_direct(
-            f"Read TODO.md and process all pending tasks. Report what you did.",
-            session_key="todo:check",
+        response = await self.agent.process_internal(
+            "Read TODO.md and process all pending tasks. Report what you did.",
+            event_type="system_event",
+            source="todo",
+            metadata={"Task": "TODO_CHECK"},
         )
 
         logger.info("ReflectProcessor: TODO processed: {}", response[:100] if response else "no response")

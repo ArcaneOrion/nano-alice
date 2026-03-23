@@ -359,18 +359,17 @@ def gateway(
 
     # Signal mode: new architecture components
     try:
-        from nano_alice.agent.reflect.processor import ReflectProcessor
         from nano_alice.agent.signals.bus import SignalBus
         from nano_alice.agent.signals.types import AgentSignal  # Added
         from nano_alice.scheduler.service import SchedulerService
         from nano_alice.todo.service import TODOService
-        SIGNAL_MODE_AVAILABLE = True
+        signal_mode_available = True
     except ImportError:
         # Fallback to old cron/heartbeat for transition
         from nano_alice.cron.service import CronService
         from nano_alice.cron.types import CronJob
         from nano_alice.heartbeat.service import HeartbeatService
-        SIGNAL_MODE_AVAILABLE = False
+        signal_mode_available = False
 
     if verbose:
         import logging
@@ -384,11 +383,11 @@ def gateway(
     session_manager = SessionManager(config.workspace_path)
 
     # Import AgentSignal for new mode
-    if SIGNAL_MODE_AVAILABLE:
+    if signal_mode_available:
         from nano_alice.agent.signals.types import AgentSignal
 
     # Signal mode: use new architecture if available
-    if SIGNAL_MODE_AVAILABLE:
+    if signal_mode_available:
         # New architecture: SignalBus + ReflectProcessor + Scheduler + TODO
         signal_bus = SignalBus()
         log_store.set_signal_bus(signal_bus)
@@ -457,12 +456,27 @@ def gateway(
         # Set cron callback (needs agent)
         async def on_cron_job(job: CronJob) -> str | None:
             """Execute a cron job through the agent."""
-            response = await agent.process_direct(
-                job.payload.message,
-                session_key=f"cron:{job.id}",
-                channel=job.payload.channel or "cli",
-                chat_id=job.payload.to or "direct",
-            )
+            channel = job.payload.channel or "cli"
+            chat_id = job.payload.to or "direct"
+            if job.payload.kind == "agent_turn":
+                response = await agent.process_direct(
+                    job.payload.message,
+                    session_key=f"cron:{job.id}",
+                    channel=channel,
+                    chat_id=chat_id,
+                )
+            else:
+                response = await agent.process_internal(
+                    job.payload.message,
+                    channel=channel,
+                    chat_id=chat_id,
+                    event_type="system_event",
+                    source="cron",
+                    metadata={
+                        "Job ID": job.id,
+                        "Job Name": job.name,
+                    },
+                )
             if job.payload.deliver and job.payload.to:
                 from nano_alice.bus.events import OutboundMessage
                 await bus.publish_outbound(OutboundMessage(
@@ -501,7 +515,7 @@ def gateway(
     if scheduler_status["jobs"] > 0:
         console.print(f"[green]✓[/green] Scheduler: {scheduler_status['jobs']} scheduled jobs")
 
-    if SIGNAL_MODE_AVAILABLE:
+    if signal_mode_available:
         console.print("[green]✓[/green] TODO: every 30m (signal mode)")
     else:
         console.print("[green]✓[/green] Heartbeat: every 30m (legacy mode)")
@@ -987,6 +1001,7 @@ def cron_add(
             deliver=deliver,
             to=to,
             channel=channel,
+            payload_kind="system_event",
         )
     except ValueError as e:
         console.print(f"[red]Error: {e}[/red]")
@@ -1073,12 +1088,27 @@ def cron_run(
     result_holder = []
 
     async def on_job(job: CronJob) -> str | None:
-        response = await agent_loop.process_direct(
-            job.payload.message,
-            session_key=f"cron:{job.id}",
-            channel=job.payload.channel or "cli",
-            chat_id=job.payload.to or "direct",
-        )
+        channel = job.payload.channel or "cli"
+        chat_id = job.payload.to or "direct"
+        if job.payload.kind == "agent_turn":
+            response = await agent_loop.process_direct(
+                job.payload.message,
+                session_key=f"cron:{job.id}",
+                channel=channel,
+                chat_id=chat_id,
+            )
+        else:
+            response = await agent_loop.process_internal(
+                job.payload.message,
+                channel=channel,
+                chat_id=chat_id,
+                event_type="system_event",
+                source="cron",
+                metadata={
+                    "Job ID": job.id,
+                    "Job Name": job.name,
+                },
+            )
         result_holder.append(response)
         return response
 
@@ -1153,10 +1183,11 @@ def logs_query(
     limit: int = typer.Option(50, "-n", "--limit", help="Max entries to return", min=1, max=500),
 ):
     """Query and display log entries."""
-    from datetime import datetime, timedelta
+    from datetime import datetime
+
+    from nano_alice.agent.tools.logs import _parse_duration
     from nano_alice.log import ensure_logging_initialized, get_log_store
     from nano_alice.log.types import Component, LogLevel
-    from nano_alice.agent.tools.logs import _parse_duration
 
     ensure_logging_initialized()
     store = get_log_store()
@@ -1234,9 +1265,10 @@ def logs_summary(
 ):
     """Show log statistics summary."""
     from datetime import datetime
+
+    from nano_alice.agent.tools.logs import _parse_duration
     from nano_alice.log import ensure_logging_initialized, get_log_store
     from nano_alice.log.types import Component
-    from nano_alice.agent.tools.logs import _parse_duration
 
     ensure_logging_initialized()
     store = get_log_store()
@@ -1265,6 +1297,7 @@ def logs_summary(
 
     # Compute summary
     from collections import Counter
+
     from nano_alice.log.types import LogLevel
 
     by_level = Counter(e.level for e in entries)

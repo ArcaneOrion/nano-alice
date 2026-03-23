@@ -84,6 +84,7 @@ class Signal:
             data={
                 "job_id": job.id,
                 "job_name": job.name,
+                "payload_kind": job.payload.kind,
                 "message": job.payload.message,
                 "deliver": job.payload.deliver,
                 "channel": job.payload.channel,
