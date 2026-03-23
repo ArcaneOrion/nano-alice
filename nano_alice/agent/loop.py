@@ -15,6 +15,7 @@ from nano_alice.agent.context import ContextBuilder
 from nano_alice.agent.memory import MemoryStore
 from nano_alice.agent.subagent import SubagentManager
 from nano_alice.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
+from nano_alice.agent.tools.logs import LogsTool
 from nano_alice.agent.tools.message import MessageTool
 from nano_alice.agent.tools.registry import ToolRegistry
 from nano_alice.agent.tools.shell import ExecTool
@@ -131,6 +132,7 @@ class AgentLoop:
         self.tools.register(WebFetchTool())
         self.tools.register(MessageTool(send_callback=self.bus.publish_outbound))
         self.tools.register(SpawnTool(manager=self.subagents))
+        self.tools.register(LogsTool())
 
         # Scheduler tool (renamed from cron)
         if self.scheduler_service:

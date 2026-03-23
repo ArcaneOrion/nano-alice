@@ -537,14 +537,22 @@ def agent(
     logs: bool = typer.Option(False, "--logs/--no-logs", help="Show nano-alice runtime logs during chat"),
 ):
     """Interact with the agent directly."""
-    from nano_alice.config.loader import load_config, get_data_dir
-    from nano_alice.bus.queue import MessageBus
+    # Initialize logging system (must be first)
+    from nano_alice.log import ensure_logging_initialized, set_console_level
+    ensure_logging_initialized()
+
+    if logs:
+        set_console_level("INFO")
+    else:
+        set_console_level("WARNING")  # Quiet by default
+
     from nano_alice.agent.loop import AgentLoop
+    from nano_alice.bus.queue import MessageBus
+    from nano_alice.config.loader import get_data_dir, load_config
     from nano_alice.cron.service import CronService
-    from loguru import logger
-    
+
     config = load_config()
-    
+
     bus = MessageBus()
     provider = _make_provider(config)
 
@@ -552,11 +560,6 @@ def agent(
     cron_store_path = get_data_dir() / "cron" / "jobs.json"
     cron = CronService(cron_store_path)
 
-    if logs:
-        logger.enable("nano_alice")
-    else:
-        logger.disable("nano_alice")
-    
     agent_loop = AgentLoop(
         bus=bus,
         provider=provider,
@@ -1024,13 +1027,16 @@ def cron_run(
     force: bool = typer.Option(False, "--force", "-f", help="Run even if disabled"),
 ):
     """Manually run a job."""
-    from loguru import logger
-    from nano_alice.config.loader import load_config, get_data_dir
+    # Initialize logging system (must be first)
+    from nano_alice.log import ensure_logging_initialized, set_console_level
+    ensure_logging_initialized()
+    set_console_level("WARNING")  # Quiet by default
+
+    from nano_alice.agent.loop import AgentLoop
+    from nano_alice.bus.queue import MessageBus
+    from nano_alice.config.loader import get_data_dir, load_config
     from nano_alice.cron.service import CronService
     from nano_alice.cron.types import CronJob
-    from nano_alice.bus.queue import MessageBus
-    from nano_alice.agent.loop import AgentLoop
-    logger.disable("nano_alice")
 
     config = load_config()
     provider = _make_provider(config)
@@ -1118,6 +1124,170 @@ def status():
             else:
                 has_key = bool(p.api_key)
                 console.print(f"{spec.label}: {'[green]✓[/green]' if has_key else '[dim]not set[/dim]'}")
+
+
+# ============================================================================
+# Logs Commands
+# ============================================================================
+
+logs_app = typer.Typer(help="View system logs")
+app.add_typer(logs_app, name="logs")
+
+
+@logs_app.command("query")
+def logs_query(
+    component: str = typer.Option(None, "-c", "--component", help="Filter by component (agent, channels, scheduler, signals, reflect, tools)"),
+    level: str = typer.Option(None, "-l", "--level", help="Filter by level (DEBUG, INFO, WARNING, ERROR)"),
+    last: str = typer.Option("1h", "--last", help="Time window (e.g. 30m, 1h, 6h)"),
+    limit: int = typer.Option(50, "-n", "--limit", help="Max entries to return", min=1, max=500),
+):
+    """Query and display log entries."""
+    from datetime import datetime, timedelta
+    from nano_alice.log import ensure_logging_initialized, get_log_store
+    from nano_alice.log.types import Component, LogLevel
+    from nano_alice.agent.tools.logs import _parse_duration
+
+    ensure_logging_initialized()
+    store = get_log_store()
+    if not store:
+        console.print("[red]LogStore not initialized[/red]")
+        return
+
+    # Parse component
+    comp_filter: Component | None = None
+    if component:
+        try:
+            comp_filter = Component(component)
+        except ValueError:
+            console.print(f"[red]Invalid component: {component}[/red]")
+            console.print(f"Valid: {', '.join(c.value for c in Component)}")
+            return
+
+    # Parse level
+    level_filter: LogLevel | None = None
+    if level:
+        try:
+            level_filter = LogLevel[level.upper()]
+        except KeyError:
+            console.print(f"[red]Invalid level: {level}[/red]")
+            console.print("Valid: DEBUG, INFO, WARNING, ERROR")
+            return
+
+    # Parse time window
+    since = datetime.now() - _parse_duration(last)
+
+    # Query
+    entries = store.query(
+        component=comp_filter,
+        level=level_filter,
+        since=since,
+        limit=min(limit, 500),
+    )
+
+    if not entries:
+        console.print("[dim]No log entries found[/dim]")
+        return
+
+    # Display
+    table = Table(title=f"Log Entries ({len(entries)})")
+    table.add_column("Time", style="dim")
+    table.add_column("Level", style="bold")
+    table.add_column("Component")
+    table.add_column("Event")
+    table.add_column("Message")
+
+    level_icons = {
+        LogLevel.DEBUG: "🔍",
+        LogLevel.INFO: "ℹ️",
+        LogLevel.WARNING: "⚠️",
+        LogLevel.ERROR: "❌",
+    }
+
+    for e in entries[:100]:  # limit display
+        level_icon = level_icons.get(e.level, "•")
+        table.add_row(
+            e.ts.strftime("%H:%M:%S"),
+            f"{level_icon} {e.level.value}",
+            e.component.value,
+            e.event,
+            e.msg[:80] + "..." if len(e.msg) > 80 else e.msg,
+        )
+
+    console.print(table)
+
+
+@logs_app.command("summary")
+def logs_summary(
+    component: str = typer.Option(None, "-c", "--component", help="Filter by component"),
+    last: str = typer.Option("1h", "--last", help="Time window (e.g. 30m, 1h, 6h)"),
+):
+    """Show log statistics summary."""
+    from datetime import datetime
+    from nano_alice.log import ensure_logging_initialized, get_log_store
+    from nano_alice.log.types import Component
+    from nano_alice.agent.tools.logs import _parse_duration
+
+    ensure_logging_initialized()
+    store = get_log_store()
+    if not store:
+        console.print("[red]LogStore not initialized[/red]")
+        return
+
+    # Parse component
+    comp_filter: Component | None = None
+    if component:
+        try:
+            comp_filter = Component(component)
+        except ValueError:
+            console.print(f"[red]Invalid component: {component}[/red]")
+            return
+
+    # Parse time window
+    since = datetime.now() - _parse_duration(last)
+
+    # Query
+    entries = store.query(component=comp_filter, since=since, limit=10000)
+
+    if not entries:
+        console.print("[dim]No log entries found[/dim]")
+        return
+
+    # Compute summary
+    from collections import Counter
+    from nano_alice.log.types import LogLevel
+
+    by_level = Counter(e.level for e in entries)
+    by_component = Counter(e.component for e in entries)
+    by_event = Counter(e.event for e in entries)
+
+    # Display
+    console.print(f"\n[bold]Log Summary[/bold] ({len(entries)} entries in last {last})\n")
+
+    # By level
+    level_table = Table(title="By Level", show_header=True)
+    level_table.add_column("Level", style="bold")
+    level_table.add_column("Count")
+    for level in [LogLevel.ERROR, LogLevel.WARNING, LogLevel.INFO, LogLevel.DEBUG]:
+        if level in by_level:
+            icon = {"ERROR": "❌", "WARNING": "⚠️", "INFO": "ℹ️", "DEBUG": "🔍"}.get(level.value, "•")
+            level_table.add_row(f"{icon} {level.value}", str(by_level[level]))
+    console.print(level_table)
+
+    # By component
+    comp_table = Table(title="By Component", show_header=True)
+    comp_table.add_column("Component", style="cyan")
+    comp_table.add_column("Count")
+    for comp, count in by_component.most_common():
+        comp_table.add_row(comp.value, str(count))
+    console.print(comp_table)
+
+    # Top events
+    event_table = Table(title="Top Events", show_header=True)
+    event_table.add_column("Event", style="green")
+    event_table.add_column("Count")
+    for event, count in by_event.most_common(10):
+        event_table.add_row(event, str(count))
+    console.print(event_table)
 
 
 # ============================================================================
