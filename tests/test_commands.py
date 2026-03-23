@@ -1,10 +1,12 @@
 import shutil
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from typer.testing import CliRunner
 
+from nano_alice.agent.signals.types import AgentSignal
 from nano_alice.cli.commands import app
 from nano_alice.config.schema import Config
 from nano_alice.providers.litellm_provider import LiteLLMProvider
@@ -128,3 +130,53 @@ def test_litellm_provider_canonicalizes_github_copilot_hyphen_prefix():
 def test_openai_codex_strip_prefix_supports_hyphen_and_underscore():
     assert _strip_model_prefix("openai-codex/gpt-5.1-codex") == "gpt-5.1-codex"
     assert _strip_model_prefix("openai_codex/gpt-5.1-codex") == "gpt-5.1-codex"
+
+
+def test_gateway_wires_log_signal_bus_and_reflect_subscriptions(monkeypatch, tmp_path):
+    config = Config()
+    config.agents.defaults.workspace = str(tmp_path / "workspace")
+
+    log_store = SimpleNamespace(set_signal_bus=Mock())
+    signal_bus = SimpleNamespace(subscribe=Mock())
+    scheduler = SimpleNamespace(status=lambda: {"jobs": 0})
+    todo = SimpleNamespace()
+    bus = SimpleNamespace()
+    provider = object()
+    session_manager = object()
+    channels = SimpleNamespace(enabled_channels=[], stop_all=AsyncMock(), start_all=AsyncMock())
+    reflect_process = AsyncMock()
+    agent = SimpleNamespace(
+        reflect_processor=SimpleNamespace(process=reflect_process),
+        run=AsyncMock(),
+        close_mcp=AsyncMock(),
+        stop=lambda: None,
+    )
+
+    monkeypatch.setattr("nano_alice.log.ensure_logging_initialized", lambda: log_store)
+    monkeypatch.setattr("nano_alice.log.set_console_level", lambda level: None)
+    monkeypatch.setattr("nano_alice.config.loader.load_config", lambda: config)
+    monkeypatch.setattr("nano_alice.config.loader.get_data_dir", lambda: tmp_path)
+    monkeypatch.setattr("nano_alice.cli.commands._make_provider", lambda cfg: provider)
+    monkeypatch.setattr("nano_alice.bus.queue.MessageBus", lambda: bus)
+    monkeypatch.setattr("nano_alice.session.manager.SessionManager", lambda workspace: session_manager)
+    monkeypatch.setattr("nano_alice.agent.signals.bus.SignalBus", lambda: signal_bus)
+    monkeypatch.setattr("nano_alice.scheduler.service.SchedulerService", lambda store_path, signal_bus: scheduler)
+    monkeypatch.setattr("nano_alice.agent.loop.AgentLoop", lambda **kwargs: agent)
+    monkeypatch.setattr(
+        "nano_alice.todo.service.TODOService",
+        lambda **kwargs: todo,
+    )
+    monkeypatch.setattr("nano_alice.channels.manager.ChannelManager", lambda cfg, msg_bus: channels)
+    monkeypatch.setattr("asyncio.run", lambda coro: coro.close())
+
+    result = runner.invoke(app, ["gateway"])
+
+    assert result.exit_code == 0
+    log_store.set_signal_bus.assert_called_once_with(signal_bus)
+
+    subscribed = signal_bus.subscribe.call_args_list
+    assert subscribed == [
+        ((AgentSignal.SCHEDULE_TRIGGER, reflect_process),),
+        ((AgentSignal.TODO_CHECK, reflect_process),),
+        ((AgentSignal.LOG_ERROR, reflect_process),),
+    ]

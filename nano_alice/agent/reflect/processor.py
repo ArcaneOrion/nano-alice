@@ -60,6 +60,8 @@ class ReflectProcessor:
                     await self._handle_todo(signal)
                 case AgentSignal.MEMORY_FULL:
                     await self._handle_memory_full(signal)
+                case AgentSignal.LOG_ERROR:
+                    await self._handle_log_error(signal)
                 case AgentSignal.STARTUP:
                     await self._handle_startup(signal)
                 case AgentSignal.SHUTDOWN:
@@ -150,6 +152,17 @@ class ReflectProcessor:
         """Handle agent shutdown."""
         logger.info("ReflectProcessor: agent shutdown signal")
         # Save state, cleanup, etc.
+
+    async def _handle_log_error(self, signal: Signal) -> None:
+        """Handle error log entry for health tracking."""
+        component = signal.data.get("component", "unknown")
+        msg = signal.data.get("msg", "")
+        ts = signal.data.get("ts", signal.timestamp.isoformat())
+
+        logger.debug("ReflectProcessor: recording error from {}", component)
+
+        # Record error in internal state
+        self.state.record_error(component, msg, ts)
 
     @staticmethod
     def _is_todo_empty(content: str) -> bool:

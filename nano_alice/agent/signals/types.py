@@ -34,6 +34,9 @@ class AgentSignal(Enum):
     # Proactive maintenance
     SELF_REFLECT = "self_reflect"          # Introspection/review time
 
+    # Logging signals
+    LOG_ERROR = "log_error"                # Error logged, track system health
+
 
 @dataclass
 class Signal:

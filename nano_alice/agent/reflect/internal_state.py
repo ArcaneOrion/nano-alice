@@ -4,9 +4,12 @@ This tracks agent-internal state that doesn't belong in conversation history:
 - Active user session (for scheduler to deliver to right place)
 - System health metrics
 - Maintenance task status
+- Error tracking from logs
 """
 
+from collections import deque
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from typing import Any
 
 
@@ -27,6 +30,14 @@ class InternalState:
     # System health
     last_memory_consolidation: str | None = None  # ISO timestamp
     last_todo_check: str | None = None
+
+    # Error tracking
+    error_count_last_hour: int = 0
+    last_error_summary: str | None = None
+    last_error_timestamp: str | None = None
+    last_error_component: str | None = None
+    components_health: dict[str, str] = field(default_factory=dict)
+    _error_timestamps: deque[datetime] = field(default_factory=deque, init=False, repr=False)
 
     # Maintenance flags
     is_consolidating: bool = False
@@ -54,3 +65,36 @@ class InternalState:
         self.active_channel = None
         self.active_chat_id = None
         self.active_session_key = None
+
+    def record_error(self, component: str, msg: str, timestamp: str) -> None:
+        """Record an error from the log system."""
+        error_time = datetime.fromisoformat(timestamp)
+        self._error_timestamps.append(error_time)
+        self._prune_error_window(now=datetime.now())
+        self.error_count_last_hour = len(self._error_timestamps)
+        self.last_error_summary = f"{component}: {msg[:100]}"
+        self.last_error_timestamp = timestamp
+        self.last_error_component = component
+        self.components_health[component] = "unhealthy"
+
+    def reset_error_count(self) -> None:
+        """Reset error count (call periodically)."""
+        self._error_timestamps.clear()
+        self.error_count_last_hour = 0
+
+    def get_health_status(self, now: datetime | None = None) -> str:
+        """Get overall health status."""
+        current_time = now or datetime.now()
+        self._prune_error_window(now=current_time)
+        self.error_count_last_hour = len(self._error_timestamps)
+        if self.error_count_last_hour > 10:
+            return "critical"
+        if self.error_count_last_hour > 5:
+            return "degraded"
+        return "healthy"
+
+    def _prune_error_window(self, now: datetime) -> None:
+        """Keep only error timestamps from the last hour."""
+        cutoff = now - timedelta(hours=1)
+        while self._error_timestamps and self._error_timestamps[0] < cutoff:
+            self._error_timestamps.popleft()

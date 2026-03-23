@@ -343,16 +343,25 @@ def gateway(
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
 ):
     """Start the nano-alice gateway."""
-    from nano_alice.config.loader import load_config, get_data_dir
-    from nano_alice.bus.queue import MessageBus
+    # Initialize logging system (must be first)
+    from nano_alice.log import ensure_logging_initialized, set_console_level
+    log_store = ensure_logging_initialized()
+
+    if verbose:
+        set_console_level("DEBUG")
+    else:
+        set_console_level("WARNING")  # Quiet by default
+
     from nano_alice.agent.loop import AgentLoop
+    from nano_alice.bus.queue import MessageBus
     from nano_alice.channels.manager import ChannelManager
+    from nano_alice.config.loader import get_data_dir, load_config
     from nano_alice.session.manager import SessionManager
 
     # Signal mode: new architecture components
     try:
-        from nano_alice.agent.signals.bus import SignalBus
         from nano_alice.agent.reflect.processor import ReflectProcessor
+        from nano_alice.agent.signals.bus import SignalBus
         from nano_alice.agent.signals.types import AgentSignal  # Added
         from nano_alice.scheduler.service import SchedulerService
         from nano_alice.todo.service import TODOService
@@ -383,6 +392,7 @@ def gateway(
     if SIGNAL_MODE_AVAILABLE:
         # New architecture: SignalBus + ReflectProcessor + Scheduler + TODO
         signal_bus = SignalBus()
+        log_store.set_signal_bus(signal_bus)
         scheduler_store_path = get_data_dir() / "cron" / "jobs.json"  # Keep path for migration
         scheduler = SchedulerService(scheduler_store_path, signal_bus=signal_bus)
 
@@ -409,6 +419,7 @@ def gateway(
         if agent.reflect_processor:
             signal_bus.subscribe(AgentSignal.SCHEDULE_TRIGGER, agent.reflect_processor.process)
             signal_bus.subscribe(AgentSignal.TODO_CHECK, agent.reflect_processor.process)
+            signal_bus.subscribe(AgentSignal.LOG_ERROR, agent.reflect_processor.process)
 
         # Create TODO service
         todo = TODOService(
