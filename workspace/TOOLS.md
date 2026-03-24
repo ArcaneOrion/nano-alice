@@ -81,51 +81,49 @@ spawn(task: str, label: str = None) -> str
 
 Use for complex or time-consuming tasks that can run independently. The subagent will complete the task and report back when done.
 
-## Scheduled Reminders (Cron)
+## Scheduled Reminders (Scheduler)
 
-Use the `exec` tool to create scheduled reminders with `nano-alice cron add`:
+Use the `scheduler` tool to schedule reminders:
 
 ### Set a recurring reminder
-```bash
-# Every day at 9am
-nano-alice cron add --name "morning" --message "Good morning! ☀️" --cron "0 9 * * *"
-
-# Every 2 hours
-nano-alice cron add --name "water" --message "Drink water! 💧" --every 7200
+```python
+scheduler(action="add", message="Good morning! ☀️", cron_expr="0 9 * * *", tz="Asia/Shanghai")
+scheduler(action="add", message="Drink water! 💧", every_seconds=7200)  # every 2 hours
 ```
 
 ### Set a one-time reminder
-```bash
-# At a specific time (ISO format)
-nano-alice cron add --name "meeting" --message "Meeting starts now!" --at "2025-01-31T15:00:00"
+```python
+scheduler(action="add", message="Meeting starts now!", at="2026-03-24T15:00:00")
 ```
 
 ### Manage reminders
-```bash
-nano-alice cron list              # List all jobs
-nano-alice cron remove <job_id>   # Remove a job
+```python
+scheduler(action="list")              # List all jobs
+scheduler(action="remove", job_id="<job_id>")   # Remove a job
 ```
 
-## Heartbeat Task Management
+**Note**: The scheduler tool automatically uses your current session context (channel/chat_id) for delivery.
 
-The `HEARTBEAT.md` file in the workspace is checked every 30 minutes.
+## Periodic Task Management
+
+The `TODO.md` file in the workspace is checked every 30 minutes.
 Use file operations to manage periodic tasks:
 
-### Add a heartbeat task
+### Add a periodic task
 ```python
 # Append a new task
 edit_file(
-    path="HEARTBEAT.md",
+    path="TODO.md",
     old_text="## Example Tasks",
     new_text="- [ ] New periodic task here\n\n## Example Tasks"
 )
 ```
 
-### Remove a heartbeat task
+### Remove a periodic task
 ```python
 # Remove a specific task
 edit_file(
-    path="HEARTBEAT.md",
+    path="TODO.md",
     old_text="- [ ] Task to remove\n",
     new_text=""
 )
@@ -135,8 +133,8 @@ edit_file(
 ```python
 # Replace the entire file
 write_file(
-    path="HEARTBEAT.md",
-    content="# Heartbeat Tasks\n\n- [ ] Task 1\n- [ ] Task 2\n"
+    path="TODO.md",
+    content="# Periodic Tasks\n\n- [ ] Task 1\n- [ ] Task 2\n"
 )
 ```
 
