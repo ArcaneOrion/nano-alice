@@ -213,6 +213,14 @@ class AgentLoop:
 
         return ", ".join(_fmt(tc) for tc in tool_calls)
 
+    @staticmethod
+    def _preview_text(text: str | None, limit: int = 120) -> str:
+        """Return a single-line preview for logs."""
+        if not text:
+            return ""
+        compact = " ".join(text.split())
+        return compact[:limit] + "..." if len(compact) > limit else compact
+
     async def _run_agent_loop(
         self,
         initial_messages: list[dict],
@@ -465,11 +473,32 @@ class AgentLoop:
             on_progress=on_progress or _bus_progress,
         )
 
+        sent_in_turn = False
+        if message_tool := self.tools.get("message"):
+            if isinstance(message_tool, MessageTool):
+                sent_in_turn = message_tool._sent_in_turn
+
         if final_content is None:
             final_content = "I've completed processing but have no response to give."
+            logger.warning(
+                "No final content generated for {}:{}; using fallback. tools_used={}, sent_in_turn={}, user_preview='{}'",
+                msg.channel,
+                msg.sender_id,
+                tools_used,
+                sent_in_turn,
+                self._preview_text(msg.content, 160),
+            )
 
-        preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
-        logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)
+        preview = self._preview_text(final_content, 120)
+        logger.info(
+            "Response to {}:{}: {} | tools_used={} sent_in_turn={} final_len={}",
+            msg.channel,
+            msg.sender_id,
+            preview,
+            tools_used,
+            sent_in_turn,
+            len(final_content),
+        )
 
         session.add_message("user", msg.content)
         session.add_message(
@@ -479,6 +508,11 @@ class AgentLoop:
 
         if message_tool := self.tools.get("message"):
             if isinstance(message_tool, MessageTool) and message_tool._sent_in_turn:
+                logger.info(
+                    "Suppressing final outbound message for {}:{} because message() already sent content this turn",
+                    msg.channel,
+                    msg.sender_id,
+                )
                 return None
 
         return OutboundMessage(
