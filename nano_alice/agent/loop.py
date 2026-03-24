@@ -489,7 +489,7 @@ class AgentLoop:
                 self._preview_text(msg.content, 160),
             )
 
-        preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
+        preview = self._preview_text(final_content, 120)
         logger.info(
             "Response to {}:{}: {} | tools_used={} sent_in_turn={} final_len={}",
             msg.channel,
