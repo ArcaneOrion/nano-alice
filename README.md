@@ -1,4 +1,4 @@
-# nano-alice 🐈
+# nano-alice 🐈(本分支已与主分支分叉，于3/24决定归档)
 
 > 本项目基于 [nanobot](https://github.com/HKUDS/nanobot)（MIT 协议），自 2026-02-22 起脱离原项目独立开发维护，定位为轻量级个人 AI 助手框架。
 
