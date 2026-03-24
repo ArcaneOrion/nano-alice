@@ -4,19 +4,12 @@ DEPRECATED: This module is renamed to 'scheduler'. Import from scheduler instead
 This file remains for backward compatibility during the transition period.
 """
 
-import asyncio
 from pathlib import Path
 from typing import Any, Callable, Coroutine
 
 # Import the new scheduler service as base
 from nano_alice.scheduler.service import SchedulerService
-from nano_alice.scheduler.types import (
-    Schedule,
-    ScheduledJob,
-    SchedulerStore,
-    JobPayload,
-    JobState,
-)
+from nano_alice.scheduler.types import Schedule, ScheduledJob, SchedulerStore
 
 # Backward compatibility aliases
 CronSchedule = Schedule
@@ -59,9 +52,8 @@ class CronService(SchedulerService):
         logger.info("Cron: executing job '{}' ({})", job.name, job.id)
 
         try:
-            response = None
             if self._legacy_on_job:
-                response = await self._legacy_on_job(job)
+                await self._legacy_on_job(job)
 
             job.state.last_status = "ok"
             job.state.last_error = None
@@ -91,6 +83,7 @@ class CronService(SchedulerService):
 
 def _now_ms() -> int:
     import time
+
     return int(time.time() * 1000)
 
 
@@ -106,9 +99,11 @@ def _compute_next_run(schedule: CronSchedule, now_ms: int) -> int | None:
 
     if schedule.kind == "cron" and schedule.expr:
         try:
-            from croniter import croniter
             from datetime import datetime
             from zoneinfo import ZoneInfo
+
+            from croniter import croniter
+
             base_time = now_ms / 1000
             tz = ZoneInfo(schedule.tz) if schedule.tz else datetime.now().astimezone().tzinfo
             base_dt = datetime.fromtimestamp(base_time, tz=tz)

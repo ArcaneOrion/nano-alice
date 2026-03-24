@@ -4,7 +4,6 @@ DEPRECATED: This module is renamed to 'todo'. Import from todo instead.
 This file remains for backward compatibility during the transition period.
 """
 
-import asyncio
 from pathlib import Path
 from typing import Any, Callable, Coroutine
 
