@@ -12,7 +12,6 @@ from loguru import logger
 
 from nano_alice.agent.signals.types import AgentSignal, Signal
 
-
 # Signal handler: async function that takes a Signal and returns nothing
 SignalHandler = Callable[[Signal], Coroutine[Any, Any, None]]
 
