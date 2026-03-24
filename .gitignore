@@ -22,4 +22,4 @@ poetry.lock
 .coverage
 htmlcov/
 botpy.log
-tests/
+
