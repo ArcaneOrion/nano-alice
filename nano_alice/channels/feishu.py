@@ -48,6 +48,12 @@ MSG_TYPE_MAP = {
 }
 
 
+def _log_preview(text: str, limit: int = 160) -> str:
+    """Compact multi-line content for log output."""
+    compact = " ".join(text.split())
+    return compact[:limit] + "..." if len(compact) > limit else compact
+
+
 def _extract_share_card_content(content_json: dict, msg_type: str) -> str:
     """Extract text representation from share cards and interactive messages."""
     parts = []
@@ -634,17 +640,39 @@ class FeishuChannel(BaseChannel):
             response = self._client.im.v1.message.create(request)
             if not response.success():
                 logger.error(
-                    "Failed to send Feishu {} message: code={}, msg={}, log_id={}",
+                    "Failed to send Feishu {} message to {}({}): code={}, msg={}, log_id={}, payload_preview='{}'",
                     msg_type,
+                    receive_id,
+                    receive_id_type,
                     response.code,
                     response.msg,
                     response.get_log_id(),
+                    _log_preview(content),
                 )
                 return False
-            logger.debug("Feishu {} message sent to {}", msg_type, receive_id)
+            data = getattr(response, "data", None)
+            message_id = getattr(data, "message_id", None)
+            root_id = getattr(data, "root_id", None)
+            logger.debug(
+                "Feishu {} message sent to {}({}): message_id={}, root_id={}, log_id={}, payload_preview='{}'",
+                msg_type,
+                receive_id,
+                receive_id_type,
+                message_id,
+                root_id,
+                response.get_log_id(),
+                _log_preview(content),
+            )
             return True
         except Exception as e:
-            logger.error("Error sending Feishu {} message: {}", msg_type, e)
+            logger.error(
+                "Error sending Feishu {} message to {}({}) with payload_preview='{}': {}",
+                msg_type,
+                receive_id,
+                receive_id_type,
+                _log_preview(content),
+                e,
+            )
             return False
 
     async def send(self, msg: OutboundMessage) -> None:
@@ -656,6 +684,15 @@ class FeishuChannel(BaseChannel):
         try:
             receive_id_type = "chat_id" if msg.chat_id.startswith("oc_") else "open_id"
             loop = asyncio.get_running_loop()
+            logger.info(
+                "Feishu outbound start: chat_id={} receive_id_type={} reply_to={} media_count={} metadata={} content_preview='{}'",
+                msg.chat_id,
+                receive_id_type,
+                msg.reply_to,
+                len(msg.media),
+                msg.metadata,
+                _log_preview(msg.content or ""),
+            )
 
             for file_path in msg.media:
                 if not os.path.isfile(file_path):
