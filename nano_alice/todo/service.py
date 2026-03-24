@@ -6,12 +6,11 @@ direct callbacks. The service emits TODO_CHECK signals when the timer fires.
 
 import asyncio
 from pathlib import Path
-from typing import Any
 
 from loguru import logger
 
 from nano_alice.agent.signals.bus import SignalBus
-from nano_alice.agent.signals.types import AgentSignal, Signal
+from nano_alice.agent.signals.types import Signal
 
 # Default interval: 30 minutes
 DEFAULT_TODO_INTERVAL_S = 30 * 60
