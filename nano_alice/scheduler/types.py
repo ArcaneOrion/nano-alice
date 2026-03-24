@@ -10,6 +10,7 @@ from typing import Literal
 @dataclass
 class Schedule:
     """Schedule definition for a job."""
+
     kind: Literal["at", "every", "cron"]
     # For "at": timestamp in ms
     at_ms: int | None = None
@@ -24,6 +25,7 @@ class Schedule:
 @dataclass
 class JobPayload:
     """What to do when the job runs."""
+
     kind: Literal["system_event", "agent_turn"] = "system_event"
     message: str = ""
     # Deliver response to channel
@@ -35,6 +37,7 @@ class JobPayload:
 @dataclass
 class JobState:
     """Runtime state of a job."""
+
     next_run_at_ms: int | None = None
     last_run_at_ms: int | None = None
     last_status: Literal["ok", "error", "skipped"] | None = None
@@ -44,6 +47,7 @@ class JobState:
 @dataclass
 class ScheduledJob:
     """A scheduled job (formerly CronJob)."""
+
     id: str
     name: str
     enabled: bool = True
@@ -58,6 +62,7 @@ class ScheduledJob:
 @dataclass
 class SchedulerStore:
     """Persistent store for scheduled jobs (formerly CronStore)."""
+
     version: int = 1
     jobs: list[ScheduledJob] = field(default_factory=list)
 

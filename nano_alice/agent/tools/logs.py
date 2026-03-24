@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 from nano_alice.agent.tools.base import Tool
 from nano_alice.log import get_log_store
-from nano_alice.log.types import Component, LogLevel
+from nano_alice.log.types import Component, LogEntry, LogLevel
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -56,27 +56,33 @@ def _format_summary(entries: Sequence[LogEntry]) -> str:
     for level, count in sorted(by_level.items(), key=lambda x: x[1], reverse=True):
         lines.append(f"- {level.value}: {count}")
 
-    lines.extend([
-        "",
-        "### By Component",
-    ])
+    lines.extend(
+        [
+            "",
+            "### By Component",
+        ]
+    )
     for comp, count in sorted(by_component.items(), key=lambda x: x[1], reverse=True):
         lines.append(f"- {comp.value}: {count}")
 
-    lines.extend([
-        "",
-        "### Top Events",
-    ])
+    lines.extend(
+        [
+            "",
+            "### Top Events",
+        ]
+    )
     for event, count in sorted(by_event.items(), key=lambda x: x[1], reverse=True)[:10]:
         lines.append(f"- {event}: {count}")
 
     # Recent errors
     errors = [e for e in entries if e.level == LogLevel.ERROR]
     if errors:
-        lines.extend([
-            "",
-            f"### Recent Errors ({len(errors)})",
-        ])
+        lines.extend(
+            [
+                "",
+                f"### Recent Errors ({len(errors)})",
+            ]
+        )
         for e in errors[:5]:
             lines.append(f"- [{e.ts.strftime('%H:%M:%S')}] {e.component.value}: {e.msg[:80]}")
 
@@ -117,8 +123,7 @@ class LogsTool(Tool):
 
     name = "logs"
     description = (
-        "查询系统日志，了解运行状态和错误信息。"
-        "可以按组件、级别、时间窗口过滤，支持摘要或详细模式。"
+        "查询系统日志，了解运行状态和错误信息。可以按组件、级别、时间窗口过滤，支持摘要或详细模式。"
     )
 
     parameters = {

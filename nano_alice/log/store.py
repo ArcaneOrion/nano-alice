@@ -163,6 +163,7 @@ class LogStore:
             )
             # Schedule signal publication (non-blocking)
             import asyncio
+
             try:
                 loop = asyncio.get_running_loop()
                 loop.create_task(self._signal_bus.publish(signal))

@@ -16,6 +16,7 @@ def get_config_path() -> Path:
 def get_data_dir() -> Path:
     """Get the nano-alice data directory."""
     from nano_alice.utils.helpers import get_data_path
+
     return get_data_path()
 
 
@@ -24,7 +25,7 @@ def _migrate_env_vars() -> None:
     prefix_old, prefix_new = "NANOBOT_", "NANO_ALICE_"
     for key, value in list(os.environ.items()):
         if key.startswith(prefix_old):
-            new_key = prefix_new + key[len(prefix_old):]
+            new_key = prefix_new + key[len(prefix_old) :]
             if new_key not in os.environ:
                 os.environ[new_key] = value
 

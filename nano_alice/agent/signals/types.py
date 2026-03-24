@@ -20,22 +20,22 @@ class AgentSignal(Enum):
 
     # Time-based signals
     SCHEDULE_TRIGGER = "schedule_trigger"  # Scheduled task (cron) fired
-    TODO_CHECK = "todo_check"              # Time to check TODO.md for tasks
-    TIMER = "timer"                        # Generic timer event
+    TODO_CHECK = "todo_check"  # Time to check TODO.md for tasks
+    TIMER = "timer"  # Generic timer event
 
     # State-based signals
-    MEMORY_FULL = "memory_full"            # Memory window exceeded
-    SESSION_IDLE = "session_idle"          # No activity for a while
+    MEMORY_FULL = "memory_full"  # Memory window exceeded
+    SESSION_IDLE = "session_idle"  # No activity for a while
 
     # Lifecycle signals
-    STARTUP = "startup"                    # Agent just started
-    SHUTDOWN = "shutdown"                  # Agent shutting down
+    STARTUP = "startup"  # Agent just started
+    SHUTDOWN = "shutdown"  # Agent shutting down
 
     # Proactive maintenance
-    SELF_REFLECT = "self_reflect"          # Introspection/review time
+    SELF_REFLECT = "self_reflect"  # Introspection/review time
 
     # Logging signals
-    LOG_ERROR = "log_error"                # Error logged, track system health
+    LOG_ERROR = "log_error"  # Error logged, track system health
 
 
 @dataclass
@@ -70,7 +70,9 @@ class Signal:
         )
 
     @classmethod
-    def schedule_trigger(cls, job: ScheduledJob | None = None, session_context: dict[str, str] | None = None) -> "Signal":
+    def schedule_trigger(
+        cls, job: ScheduledJob | None = None, session_context: dict[str, str] | None = None
+    ) -> "Signal":
         """Create a signal for scheduled task execution."""
         if job is None:
             # For type checking compatibility when no job is available

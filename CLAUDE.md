@@ -4,31 +4,36 @@
 
 ## 构建与开发
 
+项目使用 **uv** 管理依赖和环境：
+
 ```bash
-pip install -e .              # 以可编辑模式安装
-pip install -e '.[dev]'       # 包含开发依赖（pytest, ruff）
+uv sync                       # 安装所有依赖
+uv sync --dev                # 包含开发依赖（pytest, ruff）
+uv add <package>             # 添加新依赖
+uv add --dev <package>       # 添加开发依赖
+uv run nano-alice <command>  # 运行命令
 ```
 
 ## 常用命令
 
 ```bash
-nano-alice onboard            # 初始化配置和工作区
-nano-alice agent              # 交互式 CLI 对话
-nano-alice agent -m "hello"   # 单条消息模式
-nano-alice gateway            # 启动网关（频道 + 定时任务 + 心跳）
-nano-alice status             # 查看配置/Provider 状态
-nano-alice channels status    # 查看频道连接状态
-nano-alice cron list          # 列出定时任务
+uv run nano-alice onboard    # 初始化配置和工作区
+uv run nano-alice agent      # 交互式 CLI 对话
+uv run nano-alice agent -m "hello"  # 单条消息模式
+uv run nano-alice gateway    # 启动网关（频道 + 定时任务 + 心跳）
+uv run nano-alice status     # 查看配置/Provider 状态
+uv run nano-alice channels status  # 查看频道连接状态
+uv run nano-alice cron list  # 列出定时任务
 ```
 
 ## 测试与代码检查
 
 ```bash
-pytest                        # 运行所有测试
-pytest tests/test_cron_service.py  # 运行单个测试文件
-pytest -k "test_name"         # 运行指定测试
-ruff check nano_alice/        # 代码检查
-ruff format nano_alice/       # 代码格式化
+uv run pytest                        # 运行所有测试
+uv run pytest tests/test_cron_service.py  # 运行单个测试文件
+uv run pytest -k "test_name"         # 运行指定测试
+uv run ruff check nano_alice/        # 代码检查
+uv run ruff format nano_alice/       # 代码格式化
 ```
 
 Ruff 配置：行宽 100，目标 Python 3.11，规则 E/F/I/N/W，忽略 E501。

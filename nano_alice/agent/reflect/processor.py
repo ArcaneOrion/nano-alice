@@ -113,11 +113,14 @@ class ReflectProcessor:
         # Deliver if requested
         if deliver and response:
             from nano_alice.bus.events import OutboundMessage
-            await self.bus.publish_outbound(OutboundMessage(
-                channel=channel,
-                chat_id=to or "direct",
-                content=response,
-            ))
+
+            await self.bus.publish_outbound(
+                OutboundMessage(
+                    channel=channel,
+                    chat_id=to or "direct",
+                    content=response,
+                )
+            )
 
     async def _handle_todo(self, signal: Signal) -> None:
         """Handle TODO list check."""
@@ -146,7 +149,9 @@ class ReflectProcessor:
             metadata={"Task": "TODO_CHECK"},
         )
 
-        logger.info("ReflectProcessor: TODO processed: {}", response[:100] if response else "no response")
+        logger.info(
+            "ReflectProcessor: TODO processed: {}", response[:100] if response else "no response"
+        )
         self.state.last_todo_check = signal.timestamp.isoformat()
 
     async def _handle_memory_full(self, signal: Signal) -> None:
