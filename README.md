@@ -36,7 +36,7 @@ pip install -e .
 
 > [!TIP]
 > 在 `~/.nano-alice/config.json` 中设置 API Key。
-> 获取 API Key：[OpenRouter](https://openrouter.ai/keys)（全球可用）· [Brave Search](https://brave.com/search/api/)（可选，用于网页搜索）
+> 获取 API Key：[OpenRouter](https://openrouter.ai/keys)（全球可用）· [Tavily](https://tavily.com)（可选，用于网页搜索）
 
 **1. 初始化**
 
@@ -63,6 +63,19 @@ nano-alice onboard
   "agents": {
     "defaults": {
       "model": "anthropic/claude-opus-4-5"
+    }
+  }
+}
+```
+
+*设置网页搜索*（Tavily，可选）：
+```json
+{
+  "tools": {
+    "web": {
+      "search": {
+        "apiKey": "tvly-xxx"
+      }
     }
   }
 }
@@ -133,6 +146,28 @@ nano-alice agent
     }
   }
 }
+```
+
+### 网页搜索
+
+使用 [Tavily](https://tavily.com) API 进行网页搜索，免费 1000 次/月，无需信用卡。
+
+```json
+{
+  "tools": {
+    "web": {
+      "search": {
+        "apiKey": "tvly-xxx",
+        "maxResults": 5
+      }
+    }
+  }
+}
+```
+
+或使用环境变量：
+```bash
+export TAVILY_API_KEY="tvly-xxx"
 ```
 
 ### 安全

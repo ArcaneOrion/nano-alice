@@ -44,8 +44,8 @@ def _validate_url(url: str) -> tuple[bool, str]:
 
 
 class WebSearchTool(Tool):
-    """Search the web using Brave Search API."""
-    
+    """Search the web using Tavily API."""
+
     name = "web_search"
     description = "Search the web. Returns titles, URLs, and snippets."
     parameters = {
@@ -56,36 +56,35 @@ class WebSearchTool(Tool):
         },
         "required": ["query"]
     }
-    
+
     def __init__(self, api_key: str | None = None, max_results: int = 5):
-        self.api_key = api_key or os.environ.get("BRAVE_API_KEY", "")
+        self.api_key = api_key or os.environ.get("TAVILY_API_KEY", "")
         self.max_results = max_results
-    
+
     async def execute(self, query: str, count: int | None = None, **kwargs: Any) -> str:
         if not self.api_key:
-            return "Error: BRAVE_API_KEY not configured"
-        
+            return "Error: TAVILY_API_KEY not configured"
+
         try:
+            from tavily import TavilyClient
+
+            client = TavilyClient(api_key=self.api_key)
             n = min(max(count or self.max_results, 1), 10)
-            async with httpx.AsyncClient() as client:
-                r = await client.get(
-                    "https://api.search.brave.com/res/v1/web/search",
-                    params={"q": query, "count": n},
-                    headers={"Accept": "application/json", "X-Subscription-Token": self.api_key},
-                    timeout=10.0
-                )
-                r.raise_for_status()
-            
-            results = r.json().get("web", {}).get("results", [])
-            if not results:
-                return f"No results for: {query}"
-            
+            result = client.search(query, max_results=n, search_depth="basic")
+
             lines = [f"Results for: {query}\n"]
-            for i, item in enumerate(results[:n], 1):
+            for i, item in enumerate(result.get("results", [])[:n], 1):
                 lines.append(f"{i}. {item.get('title', '')}\n   {item.get('url', '')}")
-                if desc := item.get("description"):
-                    lines.append(f"   {desc}")
+                if content := item.get("content"):
+                    content = content[:200] + "..." if len(content) > 200 else content
+                    lines.append(f"   {content}")
+
+            if answer := result.get("answer"):
+                lines.insert(1, f"Answer: {answer}\n")
+
             return "\n".join(lines)
+        except ImportError:
+            return "Error: tavily-python not installed. Run: pip install tavily-python"
         except Exception as e:
             return f"Error: {e}"
 

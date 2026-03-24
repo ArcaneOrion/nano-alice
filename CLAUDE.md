@@ -90,7 +90,9 @@ Scheduler/TODO --> Signal --> SignalBus --> ReflectProcessor
 
 所有工具继承 `Tool`（`base.py` 中的 ABC），需实现 `name`、`description`、`parameters`（JSON Schema）和异步 `execute()`。通过 `ToolRegistry` 注册，由其负责参数验证和执行。
 
-内置工具：`read_file`、`write_file`、`edit_file`、`list_dir`、`exec`（Shell）、`web_search`、`web_fetch`、`message`、`spawn`、`scheduler`。MCP 工具从配置中动态加载。
+内置工具：`read_file`、`write_file`、`edit_file`、`list_dir`、`exec`（Shell）、`web_search`（Tavily）、`web_fetch`、`message`、`spawn`、`scheduler`。MCP 工具从配置中动态加载。
+
+**网页搜索**：使用 Tavily API，配置 `tools.web.search.apiKey` 或环境变量 `TAVILY_API_KEY`。
 
 ### 频道 (`channels/`)
 
